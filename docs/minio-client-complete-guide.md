@@ -11,11 +11,13 @@ share    Generate URL for sharing.
 cp       Copy files and objects.
 mirror   Mirror buckets and folders.
 find     Finds files which match the given set of parameters.
+stat     Stat contents of objects and folders.
 diff     List objects with size difference or missing between two folders or buckets.
 rm       Remove files and objects.
 events   Manage object notifications.
 watch    Watch for file and object events.
 policy   Manage anonymous access to objects.
+admin    Manage Minio servers
 session  Manage saved sessions for cp command.
 config   Manage mc configuration file.
 update   Check for a new software update.
@@ -70,15 +72,6 @@ chmod +x mc
 mc.exe --help
 ```
 
-### Snap (GNU/Linux)
-You can install the latest `minio-client` [snap](https://snapcraft.io), and help testing the most recent changes of the master branch in [all the supported Linux distros](https://snapcraft.io/docs/core/install) with:
-
-```sh
-sudo snap install minio-client --edge --devmode
-```
-
-Every time a new version is pushed to the store, you will get it updated automatically.
-
 ### Install from Source
 Source installation is intended only for developers and advanced users. `mc update` command does not support update notifications for source based installations. Please download official releases from https://minio.io/downloads/#minio-client.
 
@@ -123,32 +116,41 @@ To add one or more Amazon S3 compatible hosts, please follow the instructions be
 mc config host add <ALIAS> <YOUR-S3-ENDPOINT> <YOUR-ACCESS-KEY> <YOUR-SECRET-KEY> <API-SIGNATURE>
 ```
 
-Alias is simply a short name to you cloud storage service. S3 end-point, access and secret keys are supplied by your cloud storage provider. API signature is an optional argument. By default, it is set to "S3v4".
+Alias is simply a short name to your cloud storage service. S3 end-point, access and secret keys are supplied by your cloud storage provider. API signature is an optional argument. By default, it is set to "S3v4".
 
 ### Example - Minio Cloud Storage
 Minio server displays URL, access and secret keys.
 
 
 ```sh
-mc config host add minio http://192.168.1.51 BKIKJAA5BMMU2RHO6IBB V7f1CwQqAcwo80UEIJEjc5gVQUSSx5ohQ9GSrr12 S3v4
+mc config host add minio http://192.168.1.51 BKIKJAA5BMMU2RHO6IBB V7f1CwQqAcwo80UEIJEjc5gVQUSSx5ohQ9GSrr12 --api S3v4
 ```
 
 ### Example - Amazon S3 Cloud Storage
 Get your AccessKeyID and SecretAccessKey by following [AWS Credentials Guide](http://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSGettingStartedGuide/AWSCredentials.html).
 
 ```sh
-mc config host add s3 https://s3.amazonaws.com BKIKJAA5BMMU2RHO6IBB V7f1CwQqAcwo80UEIJEjc5gVQUSSx5ohQ9GSrr12 S3v4
+mc config host add s3 https://s3.amazonaws.com BKIKJAA5BMMU2RHO6IBB V7f1CwQqAcwo80UEIJEjc5gVQUSSx5ohQ9GSrr12 --api S3v4
 ```
 
 ### Example - Google Cloud Storage
 Get your AccessKeyID and SecretAccessKey by following [Google Credentials Guide](https://cloud.google.com/storage/docs/migrating?hl=en#keys)
 
 ```sh
-mc config host add gcs  https://storage.googleapis.com BKIKJAA5BMMU2RHO6IBB V8f1CwQqAcwo80UEIJEjc5gVQUSSx5ohQ9GSrr12 S3v2
+mc config host add gcs  https://storage.googleapis.com BKIKJAA5BMMU2RHO6IBB V8f1CwQqAcwo80UEIJEjc5gVQUSSx5ohQ9GSrr12 --api S3v2
 ```
 
 NOTE: Google Cloud Storage only supports Legacy Signature Version 2, so you have to pick - S3v2
 
+### Specify host configuration through environment variable
+```sh
+export MC_HOSTS_<alias>=https://<Access Key>:<Secret Key>@<YOUR-S3-ENDPOINT>
+```
+Example:
+```sh
+export MC_HOSTS_myalias=https://Q3AM3UQ867SPQQA43P2F:zuf+tfteSlswRu7BJ86wekitnifILbZam1KYY3TG@play.minio.io:9000
+mc ls myalias 
+``` 
 ## 4. Test Your Setup
 `mc` is pre-configured with https://play.minio.io:9000, aliased as "play". It is a hosted Minio server for testing and development purpose.  To test Amazon S3, simply replace "play" with "s3" or the alias you used at the time of setup.
 
@@ -180,9 +182,9 @@ alias find='mc find'
 ## 6. Global Options
 
 ### Option [--debug]
-Debug option enables debug output to console. 
+Debug option enables debug output to console.
 
-*Example: Display verbose debug output for `ls` command.* 
+*Example: Display verbose debug output for `ls` command.*
 
 ```sh
 mc --debug ls play
@@ -228,7 +230,7 @@ mc --json ls play
 ```
 
 ### Option [--no-color]
-This option disables the color theme. It useful for dumb terminals.
+This option disables the color theme. It is useful for dumb terminals.
 
 ### Option [--quiet]
 Quiet option suppress chatty console output.
@@ -248,7 +250,7 @@ Skip SSL certificate verification.
 | [**share** - Share access](#share)  |[**mirror** - Mirror buckets](#mirror)  | [**find** - Find files and objects](#find) |
 | [**diff** - Diff buckets](#diff) |[**policy** - Set public policy on bucket or prefix](#policy)  |[**session** - Manage saved sessions](#session) |
 | [**config** - Manage config file](#config)  | [**watch** - Watch for events](#watch)  | [**events** - Manage events on your buckets](#events)  |
-| [**update** - Manage software updates](#update)  | [**version** - Show version](#version)  |   |
+| [**update** - Manage software updates](#update)  | [**version** - Show version](#version)  | [**stat** - Stat contents of objects and folders](#stat) |
 
 
 ###  Command `ls` - List Objects
@@ -274,10 +276,11 @@ mc ls play
 [2016-03-28 21:53:49 IST]     0B guestbucket/
 [2016-04-08 20:58:18 IST]     0B mybucket/
 ```
+
 <a name="mb"></a>
 ### Command `mb` - Make a Bucket
-`mb` command creates a new bucket on an object storage. On a filesystem, it behaves like `mkdir -p` command. Bucket is equivalent of a drive or mount point in filesystems and should not be treated as folders. Minio does not place any limits on the number of buckets created per user. 
-On Amazon S3, each account is limited to 100 buckets. Please refer to [Buckets Restrictions and Limitations on S3](http://docs.aws.amazon.com/AmazonS3/latest/dev/BucketRestrictions.html) for more information.  
+`mb` command creates a new bucket on an object storage. On a filesystem, it behaves like `mkdir -p` command. Bucket is equivalent of a drive or mount point in filesystems and should not be treated as folders. Minio does not place any limits on the number of buckets created per user.
+On Amazon S3, each account is limited to 100 buckets. Please refer to [Buckets Restrictions and Limitations on S3](http://docs.aws.amazon.com/AmazonS3/latest/dev/BucketRestrictions.html) for more information.
 
 ```sh
 USAGE:
@@ -286,7 +289,7 @@ USAGE:
 FLAGS:
   --help, -h                       Show help.
   --region "us-east-1"		   Specify bucket region. Defaults to ‘us-east-1’.
-  
+
 ```
 
 *Example: Create a new bucket named "mybucket" on https://play.minio.io:9000.*
@@ -297,8 +300,15 @@ mc mb play/mybucket
 Bucket created successfully ‘play/mybucket’.
 ```
 
-<a name="cat"></a>
+*Example: Create a new bucket named "mybucket" on https://s3.amazonaws.com.*
 
+
+```sh
+mc mb s3/mybucket --region=us-west-1
+Bucket created successfully ‘s3/mybucket’.
+```
+
+<a name="cat"></a>
 ### Command `cat` - Concatenate Objects
 `cat` command concatenates contents of a file or object to another. You may also use it to simply display the contents to stdout
 
@@ -308,6 +318,10 @@ USAGE:
 
 FLAGS:
   --help, -h                       Show help.
+  --encrypt-key value              Decrypt object (using server-side encryption)
+
+ENVIRONMENT VARIABLES:
+   MC_ENCRYPT_KEY:                 List of comma delimited prefix=secret values
 ```
 
 *Example: Display the contents of a text file `myobject.txt`*
@@ -316,6 +330,14 @@ FLAGS:
 mc cat play/mybucket/myobject.txt
 Hello Minio!!
 ```
+
+*Example: Display the contents of a server encrypted object `myencryptedobject.txt`*
+
+```sh
+mc cat --encrypt-key "play/mybucket=32byteslongsecretkeymustbegiven1" play/mybucket/myencryptedobject.txt
+Hello Minio!!
+```
+
 <a name="pipe"></a>
 ### Command `pipe` - Pipe to Object
 `pipe` command copies contents of stdin to a target. When no target is specified, it writes to stdout.
@@ -325,7 +347,11 @@ USAGE:
    mc pipe [FLAGS] [TARGET]
 
 FLAGS:
-  --help, -h					Help of pipe.
+  --help, -h			Help of pipe.
+  --encrypt-key value           Encrypt object (using server-side encryption)
+
+ENVIRONMENT VARIABLES:
+   MC_ENCRYPT_KEY:              List of comma delimited prefix=secret values
 ```
 
 *Example: Stream MySQL database dump to Amazon S3 directly.*
@@ -341,18 +367,46 @@ mysqldump -u root -p ******* accountsdb | mc pipe s3/ferenginar/backups/accounts
 ```sh
 USAGE:
    mc cp [FLAGS] SOURCE [SOURCE...] TARGET
-   
+
 FLAGS:
-  --help, -h                       Show help.
-  --recursive, -r		   Copy recursively.
+  --recursive, -r                    Copy recursively.
+  --storage-class value, -sc value   Set storage class for object.
+  --help, -h                         Show help.
+  --encrypt-key value                Encrypt/Decrypt objects (using server-side encryption)
+
+ENVIRONMENT VARIABLES:
+   MC_ENCRYPT_KEY:                 List of comma delimited prefix=secret values
 ```
 
-*Example: Copy a text file to to an object storage.*
+*Example: Copy a text file to an object storage.*
 
 ```sh
 mc cp myobject.txt play/mybucket
 myobject.txt:    14 B / 14 B  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  100.00 % 41 B/s 0
 ```
+
+*Example: Copy a text file to an object storage and assign storage-class `REDUCED_REDUNDANCY` to the uploaded object.*
+
+```sh
+mc cp --storage-class REDUCED_REDUNDANCY myobject.txt play/mybucket
+myobject.txt:    14 B / 14 B  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  100.00 % 41 B/s 0
+```
+
+*Example: Copy a server-side encrypted file to an object storage.*
+
+```sh
+mc cp --recursive --encrypt-key "s3/documents/=32byteslongsecretkeymustbegiven1 , myminio/documents/=32byteslongsecretkeymustbegiven2" s3/documents/myobject.txt myminio/documents/
+myobject.txt:    14 B / 14 B  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  100.00 % 41 B/s 0
+```
+
+*Example: Perform key-rotation on a server-side encrypted object*
+
+```sh
+mc cp --encrypt-key 'myminio1/mybucket=32byteslongsecretkeymustgenerate , myminio2/mybucket/=32byteslongsecretkeymustgenerat1' myminio1/mybucket/encryptedobject myminio2/mybucket/encryptedobject
+encryptedobject:    14 B / 14 B  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  100.00 % 41 B/s 0
+```
+Notice that two different aliases myminio1 and myminio2 are used for the same endpoint to provide the old secretkey and the newly rotated key.
+
 <a name="rm"></a>
 ### Command `rm` - Remove Buckets and Objects
 Use `rm` command to remove file or bucket
@@ -362,42 +416,57 @@ USAGE:
    mc rm [FLAGS] TARGET [TARGET ...]
 
 FLAGS:
-  --help, -h                       Show help.
-  --recursive, -r	       	   Remove recursively.
-  --force			   Force a dangerous remove operation.
-  --prefix			   Remove objects matching this prefix.
-  --incomplete, -I		   Remove an incomplete upload(s).
-  --fake			   Perform a fake remove operation.
-  --stdin			   Read object list from STDIN.
-  --older-than value               Remove objects older than N days. (default: 0)
+  --help, -h            Show help.
+  --recursive, -r       Remove recursively.
+  --force               Force a dangerous remove operation.
+  --dangerous           Allow site-wide removal of buckets and objects.
+  --incomplete, -I      Remove an incomplete upload(s).
+  --fake                Perform a fake remove operation.
+  --stdin               Read object list from STDIN.
+  --older-than value    Remove objects older than N days. (default: 0)
+  --newer-than value    Remove objects newer than N days. (default: 0)
+  --encrypt-key value   Encrypt/Decrypt objects (using server-side encryption)
+ENVIRONMENT VARIABLES:
+    MC_ENCRYPT_KEY:     List of comma delimited prefix=secret values
+
+
 ```
 
 *Example: Remove a single object.*
 
 ```sh
 mc rm play/mybucket/myobject.txt
-Removed ‘play/mybucket/myobject.txt’.
+Removing `play/mybucket/myobject.txt`.
+```
+*Example: Remove an encrypted object.*
+
+```sh
+mc rm --encrypt-key "play/mybucket=32byteslongsecretkeymustbegiven1" play/mybucket/myobject.txt
+Removing `play/mybucket/myobject.txt`.
 ```
 
 *Example: Recursively remove a bucket and all its contents. Since this is a dangerous operation, you must explicitly pass `--force` option.*
 
 ```sh
-mc rm --recursive --force play/myobject
-Removed ‘play/myobject/newfile.txt’.
-Removed 'play/myobject/otherobject.txt’.
+mc rm --recursive --force play/mybucket
+Removing `play/mybucket/newfile.txt`.
+Removing `play/mybucket/otherobject.txt`.
+Removing `play/mybucket`.
 ```
 
-*Example: Remove all incompletely uploaded files from `mybucket`.*
+*Example: Remove all uploaded incomplete files for an object.*
 
 ```sh
-mc rm  --incomplete --recursive --force play/mybucket
-Removed ‘play/mybucket/mydvd.iso’.
-Removed 'play/mybucket/backup.tgz’.
+mc rm --incomplete play/mybucket/myobject.1gig
+Removing `play/mybucket/myobject.1gig`.
 ```
-*Example: Remove object only if its created older than one day.*
+*Example: Remove object and output a message only if the object is created older than one day. Otherwise, the command stays quiet and nothing is printed out.*
 
 ```sh
-mc rm --force --older-than=1 play/mybucket/oldsongs
+mc rm -r --force --older-than=1 myminio/mybucket
+Removing `myminio/mybucket/dayOld1.txt`.
+Removing `myminio/mybucket/dayOld2.txt`.
+Removing `myminio/mybucket/dayOld3.txt`.
 ```
 
 <a name="share"></a>
@@ -486,12 +555,17 @@ USAGE:
    mc mirror [FLAGS] SOURCE TARGET
 
 FLAGS:
-  --help, -h                       Show help.
-  --force			   Force overwrite of an existing target(s).
-  --fake			   Perform a fake mirror operation.
-  --watch, -w                      Watch and mirror for changes.
-  --remove			   Remove extraneous file(s) on target.
-``` 
+  --help, -h                          Show help.
+  --force                             Force overwrite of an existing target(s).
+  --fake                              Perform a fake mirror operation.
+  --watch, -w                         Watch and mirror for changes.
+  --remove                            Remove extraneous file(s) on target.
+  --storage-class value, --sc value   Set storage class for object.
+  --encrypt-key value                 Encrypt/Decrypt objects (using server-side encryption)
+
+ENVIRONMENT VARIABLES:
+   MC_ENCRYPT_KEY:                    List of comma delimited prefix=secret values
+```
 
 *Example: Mirror a local directory to 'mybucket' on https://play.minio.io:9000.*
 
@@ -587,7 +661,7 @@ mc watch ~/Photos
 
 <a name="events"></a>
 ### Command `events` - Manage bucket event notification.
-``events`` provides a convenient way to configure various types of event notifications on a bucket. Minio event notification can be configured to use AMQP, Redis, ElasticSearch, NATS and PostgreSQL services. Minio configuration provides more details on how these services can be configured. 
+``events`` provides a convenient way to configure various types of event notifications on a bucket. Minio event notification can be configured to use AMQP, Redis, ElasticSearch, NATS and PostgreSQL services. Minio configuration provides more details on how these services can be configured.
 
 ```sh
 USAGE:
@@ -644,7 +718,7 @@ PERMISSION:
 
 FLAGS:
   --help, -h                       Show help.
-```   
+```
 
 *Example: Show current anonymous bucket policy*
 
@@ -672,6 +746,10 @@ Remove any bucket policy for *mybucket/myphotos/2020/* sub-directory.
 mc policy none play/mybucket/myphotos/2020/
 Access permission for ‘play/mybucket/myphotos/2020/’ is set to 'none'
 ```
+
+<a name="admin"></a>
+### Command `admin` - Manage Minio servers
+Please visit [here](https://docs.minio.io/docs/minio-admin-complete-guide) for a more comprehensive admin guide.
 
 <a name="session"></a>
 ### Command `session` - Manage Sessions
@@ -702,7 +780,7 @@ ApwAxSwa -> [2016-04-08 01:49:19 IST] mirror miniodoc/ play/mybucket
 *Example: Resume a previously saved session.*
 
 ```sh
-mc session resume IXWKjpQM 
+mc session resume IXWKjpQM
 ...assets.go: 1.68 KB / 1.68 KB  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  100.00 % 784 B/s 2s
 ```
 
@@ -715,7 +793,7 @@ Session ‘ApwAxSwa’ cleared successfully.
 
 <a name="config"></a>
 ### Command `config` - Manage Config File
-`config host` command provides a convenient way to manage host entries in your config file `~/.mc/config.json`. It is also OK to edit the config file manually using a text editor.  
+`config host` command provides a convenient way to manage host entries in your config file `~/.mc/config.json`. It is also OK to edit the config file manually using a text editor.
 
 ```sh
 USAGE:
@@ -774,12 +852,77 @@ FLAGS:
   --json       Enable JSON formatted output.
   --help, -h   Show help.
 ```
- 
+
  *Example: Print version of mc.*
- 
+
 ```sh
 mc version
 Version: 2016-04-01T00:22:11Z
 Release-tag: RELEASE.2016-04-01T00-22-11Z
 Commit-id: 12adf3be326f5b6610cdd1438f72dfd861597fce
+```
+<a name="stat"></a>
+### Command `stat` - Stat contents of objects and folders
+`stat` command displays information on objects (with optional prefix) contained in the specified bucket on an object storage. On a filesystem, it behaves like `stat` command.
+
+```sh
+USAGE:
+   mc stat [FLAGS] TARGET
+
+FLAGS:
+  --help, -h                       Show help.
+  --recursive, -r                  Stat recursively.
+  --encrypt-key value              Encrypt/Decrypt (using server-side encryption)
+
+ENVIRONMENT VARIABLES:
+   MC_ENCRYPT_KEY:                 List of comma delimited prefix=secret values
+```
+
+*Example: Display information on a bucket named "mybucket" on https://play.minio.io:9000.*
+
+
+```sh
+mc stat play/mybucket
+Name      : mybucket/
+Date      : 2018-02-06 18:06:51 PST
+Size      : 0B
+Type      : folder
+```
+
+*Example: Display information on an encrypted object "myobject" in "mybucket" on https://play.minio.io:9000.*
+
+
+```sh
+mc stat play/mybucket/myobject --encrypt-key "play/mybucket=32byteslongsecretkeymustbegiven1"
+Name      : myobject
+Date      : 2018-03-02 11:47:13 PST
+Size      : 132B
+ETag      : d03ba22cd78282b7aef705bf31b8cded
+Type      : file
+Metadata  :
+  Content-Type                                   : application/octet-stream
+  X-Amz-Server-Side-Encryption-Customer-Key-Md5  : 4xSRdYsabg+s2nlsHKhgnw==
+  X-Amz-Server-Side-Encryption-Customer-Algorithm: AES256
+```
+
+*Example: Display information on objects contained in the bucket named "mybucket" on https://play.minio.io:9000.*
+
+
+```sh
+mc stat -r play/mybucket
+Name      : mybucket/META/textfile
+Date      : 2018-02-06 18:17:38 PST
+Size      : 1024B
+ETag      : d41d8cd98f00b204e9800998ecf8427e
+Type      : file
+Metadata  :
+  Content-Type: application/octet-stream
+
+Name      : mybucket/emptyfile
+Date      : 2018-02-06 18:16:14 PST
+Size      : 100B
+ETag      : d41d8cd98f00b204e9800998ecf8427e
+Type      : file
+Metadata  :
+  Content-Type: application/octet-stream
 ```

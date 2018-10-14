@@ -83,7 +83,7 @@ var (
 
 var findCmd = cli.Command{
 	Name:   "find",
-	Usage:  "Finds files which match the given set of parameters.",
+	Usage:  "Search for files and objects.",
 	Action: mainFind,
 	Before: setGlobalsFromContext,
 	Flags:  append(findFlags, globalFlags...),
@@ -123,44 +123,42 @@ FORMAT
       {url} --> Substitutes to a shareable URL of the path.
 
 EXAMPLES:
-   01. Find all files named foo from all buckets.
-       $ {{.HelpName}} s3 --name "file"
+   01. Find all "foo.jpg" in all buckets under "s3" account.
+       $ {{.HelpName}} s3 --name "foo.jpg"
 
-   02. Find all text files from mybucket.
+   02. Find all objects with ".txt" extension under "s3/mybucket".
        $ {{.HelpName}} s3/mybucket --name "*.txt"
 
-   03. Print only the object names without the directory component under this bucket.
-       $ {{.HelpName}} s3/bucket --name "*" -print {base}
+   03. Find only the object names without the directory component under "s3/mybucket".
+       $ {{.HelpName}} s3/mybucket --name "*" -print {base}
 
-   04. Copy all jpeg files from AWS S3 "s3/photos" bucket to minio "play/photos" bucket.
-       $ {{.HelpName}} s3/photos --name "*.jpg" --exec "mc cp {} play/photos"
-
-   05. Find all jpeg images from any folder prefixed with "album".
+   04. Find all images with ".jpg" extension under "s3/photos", prefixed with "album".
        $ {{.HelpName}} s3/photos --name "*.jpg" --path "*/album*/*"
 
-   06. Find all files with extensions jpeg, png, and gif using regex.
+   05. Find all images with ".jpg", ".png", and ".gif" extensions, using regex under "s3/photos".
        $ {{.HelpName}} s3/photos --regex "(?i)\.(jpg|png|gif)$"
 
-   07. Find all jpeg images from "s3/bucket" and copy to minio "play/bucket" *continuously*.
+   06. Find all images with ".jpg" extension under "s3/bucket" and copy to "play/bucket" *continuously*.
        $ {{.HelpName}} s3/bucket --name "*.jpg" --watch --exec "mc cp {} play/bucket"
 
-   08. Generate self expiring urls (7 days), for all objects between 64 MB, and 1 GB in size.
+   07. Find and generate public URLs valid for 7 days, for all objects between 64 MB, and 1 GB in size under "s3" account.
        $ {{.HelpName}} s3 --larger 64MB --smaller 1GB --print {url}
 
-   09. Find all files under the s3 bucket which were created within a week.
+   08. Find all objects created in the last week under "s3/bucket".
        $ {{.HelpName}} s3/bucket --newer 1w
 
-   10. Find all files which were created more than 6 months ago ignoring files ending in jpg.
+   09. Find all objects which were created more than 6 months ago, and exclude the ones with ".jpg"
+       extension under "s3".
        $ {{.HelpName}} s3 --older 6m --ignore "*.jpg"
 
-   11. List all objects up to 3 levels subdirectory deep.
+   10. List all objects up to 3 levels sub-directory deep under "s3/bucket".
        $ {{.HelpName}} s3/bucket --maxdepth 3
 
 `,
 }
 
 // checkFindSyntax - validate the passed arguments
-func checkFindSyntax(ctx *cli.Context) {
+func checkFindSyntax(ctx *cli.Context, encKeyDB map[string][]prefixSSEPair) {
 	args := ctx.Args()
 	if !args.Present() {
 		args = []string{"./"} // No args just default to present directory.
@@ -176,7 +174,7 @@ func checkFindSyntax(ctx *cli.Context) {
 
 	// Extract input URLs and validate.
 	for _, url := range args {
-		_, _, err := url2Stat(url)
+		_, _, err := url2Stat(url, false, encKeyDB)
 		if err != nil && !isURLPrefixExists(url, false) {
 			// Bucket name empty is a valid error for 'find myminio' unless we are using watch, treat it as such.
 			if _, ok := err.ToGoError().(BucketNameEmpty); ok && !ctx.Bool("watch") {
@@ -216,8 +214,13 @@ type findContext struct {
 func mainFind(ctx *cli.Context) error {
 	// Additional command specific theme customization.
 	console.SetColor("Find", color.New(color.FgGreen, color.Bold))
+	console.SetColor("FindExecErr", color.New(color.FgRed, color.Italic, color.Bold))
 
-	checkFindSyntax(ctx)
+	// Parse encryption keys per command.
+	encKeyDB, err := getEncKeys(ctx)
+	fatalIf(err, "Unable to parse encryption keys.")
+
+	checkFindSyntax(ctx, encKeyDB)
 
 	args := ctx.Args()
 	if !args.Present() {
@@ -271,6 +274,7 @@ func mainFind(ctx *cli.Context) error {
 		namePattern:   ctx.String("name"),
 		pathPattern:   ctx.String("path"),
 		regexPattern:  ctx.String("regex"),
+		ignorePattern: ctx.String("ignore"),
 		olderThan:     olderThan,
 		newerThan:     newerThan,
 		largerSize:    largerSize,

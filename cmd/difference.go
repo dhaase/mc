@@ -21,7 +21,7 @@ import (
 	"unicode/utf8"
 
 	// golang does not support flat keys for path matching, find does
-	"github.com/minio/minio/pkg/wildcard"
+
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -55,26 +55,17 @@ func (d differType) String() string {
 	return "unknown"
 }
 
-func objectDifference(sourceClnt, targetClnt Client, sourceURL, targetURL string, excludeOptions []string) (diffCh chan diffMessage) {
-	return difference(sourceClnt, targetClnt, sourceURL, targetURL, true, false, DirNone, excludeOptions)
+func objectDifference(sourceClnt, targetClnt Client, sourceURL, targetURL string) (diffCh chan diffMessage) {
+	return difference(sourceClnt, targetClnt, sourceURL, targetURL, true, false, DirNone)
 }
 
 func dirDifference(sourceClnt, targetClnt Client, sourceURL, targetURL string) (diffCh chan diffMessage) {
-	return difference(sourceClnt, targetClnt, sourceURL, targetURL, false, true, DirFirst, nil)
-}
-
-func matchExcludeOptions(excludeOptions []string, srcSuffix string) bool {
-	for _, pattern := range excludeOptions {
-		if wildcard.Match(pattern, srcSuffix) {
-			return true
-		}
-	}
-	return false
+	return difference(sourceClnt, targetClnt, sourceURL, targetURL, false, true, DirFirst)
 }
 
 // objectDifference function finds the difference between all objects
 // recursively in sorted order from source and target.
-func difference(sourceClnt, targetClnt Client, sourceURL, targetURL string, isRecursive, returnSimilar bool, dirOpt DirOpt, excludeOptions []string) (diffCh chan diffMessage) {
+func difference(sourceClnt, targetClnt Client, sourceURL, targetURL string, isRecursive, returnSimilar bool, dirOpt DirOpt) (diffCh chan diffMessage) {
 	var (
 		srcEOF, tgtEOF       bool
 		srcOk, tgtOk         bool
@@ -107,14 +98,12 @@ func difference(sourceClnt, targetClnt Client, sourceURL, targetURL string, isRe
 
 			if !srcEOF && srcCtnt.Err != nil {
 				diffCh <- diffMessage{Error: srcCtnt.Err.Trace(sourceURL, targetURL)}
-				srcCtnt, srcOk = <-srcCh
-				continue
+				return
 			}
 
 			if !tgtEOF && tgtCtnt.Err != nil {
 				diffCh <- diffMessage{Error: tgtCtnt.Err.Trace(sourceURL, targetURL)}
-				tgtCtnt, tgtOk = <-tgtCh
-				continue
+				return
 			}
 
 			// If source doesn't have objects anymore, comparison becomes obvious
@@ -125,14 +114,6 @@ func difference(sourceClnt, targetClnt Client, sourceURL, targetURL string, isRe
 					secondContent: tgtCtnt,
 				}
 				tgtCtnt, tgtOk = <-tgtCh
-				continue
-			}
-
-			srcSuffix = strings.TrimPrefix(srcCtnt.URL.String(), sourceURL)
-
-			//Skip the objects that match the Exclude options provided
-			if matchExcludeOptions(excludeOptions, srcSuffix) {
-				srcCtnt, srcOk = <-srcCh
 				continue
 			}
 
@@ -147,6 +128,7 @@ func difference(sourceClnt, targetClnt Client, sourceURL, targetURL string, isRe
 				continue
 			}
 
+			srcSuffix = strings.TrimPrefix(srcCtnt.URL.String(), sourceURL)
 			tgtSuffix = strings.TrimPrefix(tgtCtnt.URL.String(), targetURL)
 
 			current := urlJoinPath(targetURL, srcSuffix)

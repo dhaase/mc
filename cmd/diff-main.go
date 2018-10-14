@@ -35,7 +35,7 @@ var (
 // Compute differences between two files or folders.
 var diffCmd = cli.Command{
 	Name:   "diff",
-	Usage:  "List objects with size difference or missing between two folders or buckets.",
+	Usage:  "List differences in object name, size, and date between folders.",
 	Action: mainDiff,
 	Before: setGlobalsFromContext,
 	Flags:  append(diffFlags, globalFlags...),
@@ -49,21 +49,20 @@ FLAGS:
   {{range .VisibleFlags}}{{.}}
   {{end}}
 DESCRIPTION:
-  Diff only lists missing objects or objects with size differences. It *DOES NOT* compare contents. 
-  i.e. objects of same name and size, but differing in content are not noticed.
+  Diff only calculates differences in object name, size and time.
+  It *DOES NOT* compare objects' contents. 
 
-  Differences between source and destination are represented by mark notations with following meaning:
-    > - indicates file should be copied.
-    < - indicates file should be deleted.
-    ! - indicates file differs in size or type.
+LEGEND:
+    > - object is only in source.
+    < - object is only in destination.
+    ! - newer object is in source.
 
 EXAMPLES:
   1. Compare a local folder with a folder on Amazon S3 cloud storage.
-     $ {{.HelpName}} ~/Photos s3/MyBucket/Photos
+     $ {{.HelpName}} ~/Photos s3/mybucket/Photos
 
-  2. Compare two different folders on a local filesystem.
+  2. Compare two folders on a local filesystem.
      $ {{.HelpName}} ~/Photos /Media/Backup/Photos
-
 `,
 }
 
@@ -109,7 +108,7 @@ func (d diffMessage) JSON() string {
 	return string(diffJSONBytes)
 }
 
-func checkDiffSyntax(ctx *cli.Context) {
+func checkDiffSyntax(ctx *cli.Context, encKeyDB map[string][]prefixSSEPair) {
 	if len(ctx.Args()) != 2 {
 		cli.ShowCommandHelpAndExit(ctx, "diff", 1) // last argument is exit code
 	}
@@ -125,7 +124,7 @@ func checkDiffSyntax(ctx *cli.Context) {
 	// Diff only works between two directories, verify them below.
 
 	// Verify if firstURL is accessible.
-	_, firstContent, err := url2Stat(firstURL)
+	_, firstContent, err := url2Stat(firstURL, false, encKeyDB)
 	if err != nil {
 		fatalIf(err.Trace(firstURL), fmt.Sprintf("Unable to stat '%s'.", firstURL))
 	}
@@ -136,7 +135,7 @@ func checkDiffSyntax(ctx *cli.Context) {
 	}
 
 	// Verify if secondURL is accessible.
-	_, secondContent, err := url2Stat(secondURL)
+	_, secondContent, err := url2Stat(secondURL, false, encKeyDB)
 	if err != nil {
 		fatalIf(err.Trace(secondURL), fmt.Sprintf("Unable to stat '%s'.", secondURL))
 	}
@@ -176,7 +175,7 @@ func doDiffMain(firstURL, secondURL string) error {
 	}
 
 	// Diff first and second urls.
-	for diffMsg := range objectDifference(firstClient, secondClient, firstURL, secondURL, nil) {
+	for diffMsg := range objectDifference(firstClient, secondClient, firstURL, secondURL) {
 		if diffMsg.Error != nil {
 			errorIf(diffMsg.Error, "Unable to calculate objects difference.")
 			// Ignore error and proceed to next object.
@@ -190,9 +189,12 @@ func doDiffMain(firstURL, secondURL string) error {
 
 // mainDiff main for 'diff'.
 func mainDiff(ctx *cli.Context) error {
+	// Parse encryption keys per command.
+	encKeyDB, err := getEncKeys(ctx)
+	fatalIf(err, "Unable to parse encryption keys.")
 
 	// check 'diff' cli arguments.
-	checkDiffSyntax(ctx)
+	checkDiffSyntax(ctx, encKeyDB)
 
 	// Additional command specific theme customization.
 	console.SetColor("DiffMessage", color.New(color.FgGreen, color.Bold))

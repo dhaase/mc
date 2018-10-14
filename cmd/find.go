@@ -70,7 +70,7 @@ func (f findMessage) JSON() string {
 //
 func nameMatch(pattern, path string) bool {
 	matched, e := filepath.Match(pattern, filepath.Base(path))
-	errorIf(probe.NewError(e).Trace(pattern, path), "Unable to match with input pattern")
+	errorIf(probe.NewError(e).Trace(pattern, path), "Unable to match with input pattern.")
 	if !matched {
 		for _, pathComponent := range strings.Split(path, "/") {
 			matched = pathComponent == pattern
@@ -94,8 +94,20 @@ func pathMatch(pattern, path string) bool {
 // regexMatch reports whether path matches the regex pattern.
 func regexMatch(pattern, path string) bool {
 	matched, e := regexp.MatchString(pattern, path)
-	errorIf(probe.NewError(e).Trace(pattern), "Unable to regex match with input pattern")
+	errorIf(probe.NewError(e).Trace(pattern), "Unable to regex match with input pattern.")
 	return matched
+}
+
+func getExitStatus(err error) int {
+	if err == nil {
+		return 0
+	}
+	if pe, ok := err.(*exec.ExitError); ok {
+		if es, ok := pe.ProcessState.Sys().(syscall.WaitStatus); ok {
+			return es.ExitStatus()
+		}
+	}
+	return 1
 }
 
 // execFind executes the input command line, additionally formats input
@@ -105,11 +117,15 @@ func execFind(command string) {
 
 	cmd := exec.Command(commandArgs[0], commandArgs[1:]...)
 	var out bytes.Buffer
+	var stderr bytes.Buffer
 	cmd.Stdout = &out
+	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		console.Fatalln(err)
+		console.Print(console.Colorize("FindExecErr", stderr.String()))
+		// Return exit status of the command run
+		os.Exit(getExitStatus(err))
 	}
-	console.Println(out.String())
+	console.PrintC(out.String())
 }
 
 // watchFind - enables listening on the input path, listens for all file/object
@@ -125,7 +141,7 @@ func watchFind(ctx *findContext) {
 		events:    []string{"put"},
 	}
 	watchObj, err := ctx.clnt.Watch(params)
-	fatalIf(err.Trace(ctx.targetAlias), "Cannot watch with given params")
+	fatalIf(err.Trace(ctx.targetAlias), "Cannot watch with given params.")
 
 	// Enables users to kill using the control + c
 	trapCh := signalTrap(os.Interrupt, syscall.SIGTERM)
@@ -144,7 +160,7 @@ func watchFind(ctx *findContext) {
 
 			time, e := time.Parse(time.RFC3339, event.Time)
 			if e != nil {
-				errorIf(probe.NewError(e).Trace(event.Time), "Unable to parse event time")
+				errorIf(probe.NewError(e).Trace(event.Time), "Unable to parse event time.")
 				continue
 			}
 
@@ -207,22 +223,17 @@ func getAliasedPath(ctx *findContext, path string) string {
 }
 
 func find(ctx *findContext, fileContent contentMessage) {
-	// Maxdepth can modify the filepath to end as a directory prefix
-	// to be consistent with the find behavior, we wont list directories
-	// so any paths which end with a separator are ignored.
-	if strings.HasSuffix(fileContent.Key, string(ctx.clnt.GetURL().Separator)) {
-		return
-	}
-
 	// Match the incoming content, didn't match return.
 	if !matchFind(ctx, fileContent) {
 		return
 	} // For all matching content
+
 	// proceed to either exec, format the output string.
-	switch {
-	case ctx.execCmd != "":
+	if ctx.execCmd != "" {
 		execFind(stringsReplace(ctx.execCmd, fileContent))
-	case ctx.printFmt != "":
+		return
+	}
+	if ctx.printFmt != "" {
 		fileContent.Key = stringsReplace(ctx.printFmt, fileContent)
 	}
 	printMsg(findMessage{fileContent})
@@ -235,6 +246,8 @@ func doFind(ctx *findContext) error {
 	// for all I/O events until cancelled by user, if watch is not enabled
 	// following defer is a no-op.
 	defer watchFind(ctx)
+
+	var prevKeyName string
 
 	// iterate over all content which is within the given directory
 	for content := range ctx.clnt.List(true, false, DirNone) {
@@ -261,13 +274,30 @@ func doFind(ctx *findContext) error {
 			continue
 		}
 
-		// Executes all the find functionalities.
-		find(ctx, contentMessage{
-			Key:  getAliasedPath(ctx, content.URL.String()),
+		fileKeyName := getAliasedPath(ctx, content.URL.String())
+		fileContent := contentMessage{
+			Key:  fileKeyName,
 			Time: content.Time.Local(),
 			Size: content.Size,
-		})
+		}
 
+		// Match the incoming content, didn't match return.
+		if !matchFind(ctx, fileContent) || prevKeyName == fileKeyName {
+			continue
+		} // For all matching content
+
+		prevKeyName = fileKeyName
+
+		// proceed to either exec, format the output string.
+		if ctx.execCmd != "" {
+			execFind(stringsReplace(ctx.execCmd, fileContent))
+			continue
+		}
+		if ctx.printFmt != "" {
+			fileContent.Key = stringsReplace(ctx.printFmt, fileContent)
+		}
+
+		printMsg(findMessage{fileContent})
 	}
 
 	// Success, notice watch will execute in defer only if enabled and this call
@@ -425,12 +455,12 @@ var defaultSevenDays = time.Duration(604800) * time.Second
 // argument to generate and return presigned URLs, returns error if any.
 func getShareURL(path string) string {
 	targetAlias, targetURLFull, _, err := expandAlias(path)
-	fatalIf(err.Trace(path), "Unable to expand alias")
+	fatalIf(err.Trace(path), "Unable to expand alias.")
 
 	clnt, err := newClientFromAlias(targetAlias, targetURLFull)
 	fatalIf(err.Trace(targetAlias, targetURLFull), "Unable to initialize client instance from alias.")
 
-	content, err := clnt.Stat(false, false)
+	content, err := clnt.Stat(false, false, "")
 	fatalIf(err.Trace(targetURLFull, targetAlias), "Unable to lookup file/object.")
 
 	// Skip if its a directory.

@@ -30,7 +30,7 @@ const (
 )
 
 const (
-	globalMCConfigVersion = "8"
+	globalMCConfigVersion = "9"
 
 	globalMCConfigDir        = ".mc/"
 	globalMCConfigWindowsDir = "mc\\"
@@ -56,6 +56,7 @@ var (
 	globalDebug    = false // Debug flag set via command line
 	globalNoColor  = false // No Color flag set via command line
 	globalInsecure = false // Insecure flag set via command line
+
 	// WHEN YOU ADD NEXT GLOBAL FLAG, MAKE SURE TO ALSO UPDATE SESSION CODE AND CODE BELOW.
 )
 
@@ -81,7 +82,7 @@ func setGlobals(quiet, debug, json, noColor, insecure bool) {
 	}
 
 	// Disable colorified messages if requested.
-	if globalNoColor {
+	if globalNoColor || globalQuiet {
 		console.SetColorOff()
 	}
 }

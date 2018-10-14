@@ -19,20 +19,37 @@ package cmd
 import (
 	"context"
 	"io"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 
+	"github.com/minio/cli"
 	"github.com/minio/mc/pkg/probe"
+	"golang.org/x/net/http/httpguts"
 )
+
+// parse and return encryption key pairs per alias.
+func getEncKeys(ctx *cli.Context) (map[string][]prefixSSEPair, *probe.Error) {
+	sseKeys := os.Getenv("MC_ENCRYPT_KEY")
+	if key := ctx.String("encrypt-key"); key != "" {
+		sseKeys = key
+	}
+
+	encKeyDB, err := parseAndValidateEncryptionKeys(sseKeys)
+	if err != nil {
+		return nil, err.Trace(sseKeys)
+	}
+	return encKeyDB, nil
+}
 
 // Check if the passed URL represents a folder. It may or may not exist yet.
 // If it exists, we can easily check if it is a folder, if it doesn't exist,
 // we can guess if the url is a folder from how it looks.
-func isAliasURLDir(aliasURL string) bool {
+func isAliasURLDir(aliasURL string, keys map[string][]prefixSSEPair) bool {
 	// If the target url exists, check if it is a directory
 	// and return immediately.
-	_, targetContent, err := url2Stat(aliasURL)
+	_, targetContent, err := url2Stat(aliasURL, false, keys)
 	if err == nil {
 		return targetContent.Type.IsDir()
 	}
@@ -66,45 +83,49 @@ func isAliasURLDir(aliasURL string) bool {
 }
 
 // getSourceStreamFromURL gets a reader from URL.
-func getSourceStreamFromURL(urlStr string) (reader io.Reader, err *probe.Error) {
+func getSourceStreamFromURL(urlStr string, encKeyDB map[string][]prefixSSEPair) (reader io.Reader, err *probe.Error) {
 	alias, urlStrFull, _, err := expandAlias(urlStr)
 	if err != nil {
 		return nil, err.Trace(urlStr)
 	}
-	reader, _, err = getSourceStream(alias, urlStrFull, false)
+	sseKey := getSSEKey(urlStr, encKeyDB[alias])
+	reader, _, err = getSourceStream(alias, urlStrFull, false, sseKey)
 	return reader, err
 }
 
 // getSourceStream gets a reader from URL.
-func getSourceStream(alias string, urlStr string, fetchStat bool) (reader io.Reader, metadata map[string]string, err *probe.Error) {
+func getSourceStream(alias string, urlStr string, fetchStat bool, sseKey string) (reader io.Reader, metadata map[string]string, err *probe.Error) {
 	sourceClnt, err := newClientFromAlias(alias, urlStr)
 	if err != nil {
 		return nil, nil, err.Trace(alias, urlStr)
 	}
-	reader, err = sourceClnt.Get()
+	reader, err = sourceClnt.Get(sseKey)
 	if err != nil {
 		return nil, nil, err.Trace(alias, urlStr)
 	}
 	metadata = map[string]string{}
 	if fetchStat {
-		st, err := sourceClnt.Stat(false, false)
+		st, err := sourceClnt.Stat(false, true, sseKey)
 		if err != nil {
 			return nil, nil, err.Trace(alias, urlStr)
 		}
 		for k, v := range st.Metadata {
-			metadata[k] = v
+			if httpguts.ValidHeaderFieldName(k) &&
+				httpguts.ValidHeaderFieldValue(v) {
+				metadata[k] = v
+			}
 		}
 	}
 	return reader, metadata, nil
 }
 
 // putTargetStream writes to URL from Reader.
-func putTargetStream(ctx context.Context, alias string, urlStr string, reader io.Reader, size int64, metadata map[string]string, progress io.Reader) (int64, *probe.Error) {
+func putTargetStream(ctx context.Context, alias string, urlStr string, reader io.Reader, size int64, metadata map[string]string, progress io.Reader, sseKey string) (int64, *probe.Error) {
 	targetClnt, err := newClientFromAlias(alias, urlStr)
 	if err != nil {
 		return 0, err.Trace(alias, urlStr)
 	}
-	n, err := targetClnt.Put(ctx, reader, size, metadata, progress)
+	n, err := targetClnt.Put(ctx, reader, size, metadata, progress, sseKey)
 	if err != nil {
 		return n, err.Trace(alias, urlStr)
 	}
@@ -112,7 +133,7 @@ func putTargetStream(ctx context.Context, alias string, urlStr string, reader io
 }
 
 // putTargetStreamWithURL writes to URL from reader. If length=-1, read until EOF.
-func putTargetStreamWithURL(urlStr string, reader io.Reader, size int64) (int64, *probe.Error) {
+func putTargetStreamWithURL(urlStr string, reader io.Reader, size int64, sseKey string) (int64, *probe.Error) {
 	alias, urlStrFull, _, err := expandAlias(urlStr)
 	if err != nil {
 		return 0, err.Trace(alias, urlStr)
@@ -121,16 +142,16 @@ func putTargetStreamWithURL(urlStr string, reader io.Reader, size int64) (int64,
 	metadata := map[string]string{
 		"Content-Type": contentType,
 	}
-	return putTargetStream(context.Background(), alias, urlStrFull, reader, size, metadata, nil)
+	return putTargetStream(context.Background(), alias, urlStrFull, reader, size, metadata, nil, sseKey)
 }
 
 // copySourceToTargetURL copies to targetURL from source.
-func copySourceToTargetURL(alias string, urlStr string, source string, size int64, progress io.Reader) *probe.Error {
+func copySourceToTargetURL(alias string, urlStr string, source string, size int64, progress io.Reader, srcSSEKey, tgtSSEKey string) *probe.Error {
 	targetClnt, err := newClientFromAlias(alias, urlStr)
 	if err != nil {
 		return err.Trace(alias, urlStr)
 	}
-	err = targetClnt.Copy(source, size, progress)
+	err = targetClnt.Copy(source, size, progress, srcSSEKey, tgtSSEKey)
 	if err != nil {
 		return err.Trace(alias, urlStr)
 	}
@@ -146,21 +167,31 @@ func uploadSourceToTargetURL(ctx context.Context, urls URLs, progress io.Reader)
 	targetAlias := urls.TargetAlias
 	targetURL := urls.TargetContent.URL
 	length := urls.SourceContent.Size
-
 	// Optimize for server side copy if the host is same.
 	if sourceAlias == targetAlias {
 		sourcePath := filepath.ToSlash(sourceURL.Path)
-		err := copySourceToTargetURL(targetAlias, targetURL.String(), sourcePath, length, progress)
+		err := copySourceToTargetURL(targetAlias, targetURL.String(), sourcePath, length, progress, urls.SrcSSEKey, urls.TgtSSEKey)
 		if err != nil {
 			return urls.WithError(err.Trace(sourceURL.String()))
 		}
 	} else {
 		// Proceed with regular stream copy.
-		reader, metadata, err := getSourceStream(sourceAlias, sourceURL.String(), true)
+		reader, metadata, err := getSourceStream(sourceAlias, sourceURL.String(), true, urls.SrcSSEKey)
 		if err != nil {
 			return urls.WithError(err.Trace(sourceURL.String()))
 		}
-		_, err = putTargetStream(ctx, targetAlias, targetURL.String(), reader, length, metadata, progress)
+		// Get metadata from target content as well
+		if urls.TargetContent.Metadata != nil {
+			for k, v := range urls.TargetContent.Metadata {
+				metadata[k] = v
+			}
+		}
+		if urls.SrcSSEKey != "" {
+			delete(metadata, "X-Amz-Server-Side-Encryption-Customer-Algorithm")
+			delete(metadata, "X-Amz-Server-Side-Encryption-Customer-Key-Md5")
+		}
+
+		_, err = putTargetStream(ctx, targetAlias, targetURL.String(), reader, length, metadata, progress, urls.TgtSSEKey)
 		if err != nil {
 			return urls.WithError(err.Trace(targetURL.String()))
 		}
@@ -171,9 +202,13 @@ func uploadSourceToTargetURL(ctx context.Context, urls URLs, progress io.Reader)
 // newClientFromAlias gives a new client interface for matching
 // alias entry in the mc config file. If no matching host config entry
 // is found, fs client is returned.
-func newClientFromAlias(alias string, urlStr string) (Client, *probe.Error) {
-	s3Config, err := buildS3Config(alias, urlStr)
+func newClientFromAlias(alias, urlStr string) (Client, *probe.Error) {
+	alias, _, hostCfg, err := expandAlias(alias)
 	if err != nil {
+		return nil, err.Trace(alias, urlStr)
+	}
+
+	if hostCfg == nil {
 		// No matching host config. So we treat it like a
 		// filesystem.
 		fsClient, fsErr := fsNew(urlStr)
@@ -182,6 +217,8 @@ func newClientFromAlias(alias string, urlStr string) (Client, *probe.Error) {
 		}
 		return fsClient, nil
 	}
+
+	s3Config := newS3Config(urlStr, hostCfg)
 
 	s3Client, err := s3New(s3Config)
 	if err != nil {

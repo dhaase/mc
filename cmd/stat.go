@@ -100,7 +100,7 @@ func parseStat(targetAlias string, c *clientContent) statMessage {
 		return "file"
 	}()
 	content.Size = c.Size
-	content.Key = targetAlias + getKey(c)
+	content.Key = getKey(c)
 	content.Metadata = c.Metadata
 	content.ETag = strings.TrimPrefix(c.ETag, "\"")
 	content.ETag = strings.TrimSuffix(content.ETag, "\"")
@@ -110,30 +110,7 @@ func parseStat(targetAlias string, c *clientContent) statMessage {
 }
 
 // doStat - list all entities inside a folder.
-func doStat(clnt Client, isRecursive bool, targetAlias, targetURL string) error {
-	if !isRecursive || !isAliasURLDir(targetURL) {
-		isIncomplete := false
-		fetchMeta := true
-		if st, err := clnt.Stat(isIncomplete, fetchMeta); err != nil {
-			switch err.ToGoError().(type) {
-			default:
-				fatalIf(err.Trace(targetURL), "Unable to initialize `"+targetURL+"`.")
-			}
-		} else {
-			st := parseStat(targetAlias, st)
-			if !globalJSON {
-				printStat(st)
-			} else {
-				console.Println(st.JSON())
-			}
-			return nil
-		}
-	}
-	if !strings.HasSuffix(targetURL, string(clnt.GetURL().Separator)) {
-		targetURL = targetURL + string(clnt.GetURL().Separator)
-	}
-	clnt, err := newClient(targetURL)
-	fatalIf(err.Trace(targetURL), "Unable to initialize target `"+targetURL+"`.")
+func doStat(clnt Client, isRecursive bool, targetAlias, targetURL string, encKeyDB map[string][]prefixSSEPair) error {
 
 	prefixPath := clnt.GetURL().Path
 	separator := string(clnt.GetURL().Separator)
@@ -142,7 +119,6 @@ func doStat(clnt Client, isRecursive bool, targetAlias, targetURL string) error 
 	}
 	var cErr error
 	isIncomplete := false
-	var prevStat *clientContent
 	for content := range clnt.List(isRecursive, isIncomplete, DirNone) {
 		if content.Err != nil {
 			switch content.Err.ToGoError().(type) {
@@ -167,26 +143,23 @@ func doStat(clnt Client, isRecursive bool, targetAlias, targetURL string) error 
 			cErr = exitStatus(globalErrorExitStatus) // Set the exit status.
 			continue
 		}
+		url := targetAlias + getKey(content)
+		_, stat, err := url2Stat(url, true, encKeyDB)
+		if err != nil {
+			stat = content
+		}
 		// Convert any os specific delimiters to "/".
-		contentURL := filepath.ToSlash(content.URL.Path)
+		contentURL := filepath.ToSlash(stat.URL.Path)
 		prefixPath = filepath.ToSlash(prefixPath)
 		// Trim prefix path from the content path.
 		contentURL = strings.TrimPrefix(contentURL, prefixPath)
-		content.URL.Path = contentURL
-		_, stat, err := url2StatWithMetadata(targetURL+getKey(content), true)
-		if err != nil {
-			continue
-		}
-		if stat != prevStat {
-			st := parseStat(targetAlias, stat)
-			if !globalJSON {
-				printStat(st)
-			} else {
-				console.Println(st.JSON())
-			}
+		stat.URL.Path = contentURL
+		st := parseStat(targetAlias, stat)
+		if !globalJSON {
+			printStat(st)
 		} else {
+			console.Println(st.JSON())
 		}
-		prevStat = stat
 	}
 	return cErr
 }

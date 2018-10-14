@@ -78,6 +78,7 @@ func mainConfigHostList(ctx *cli.Context) error {
 	console.SetColor("AccessKey", color.New(color.FgBlue))
 	console.SetColor("SecretKey", color.New(color.FgBlue))
 	console.SetColor("API", color.New(color.FgYellow))
+	console.SetColor("Lookup", color.New(color.FgCyan))
 
 	args := ctx.Args()
 	listHosts(args.Get(0)) // List all configured hosts.
@@ -129,10 +130,11 @@ func listHosts(alias string) {
 				AccessKey:   v.AccessKey,
 				SecretKey:   v.SecretKey,
 				API:         v.API,
+				Lookup:      v.Lookup,
 			})
 			return
 		}
-		fatalIf(errInvalidAliasedURL(alias), "No such alias `"+alias+"` found")
+		fatalIf(errInvalidAliasedURL(alias), "No such alias `"+alias+"` found.")
 	}
 
 	var hosts []hostMessage
@@ -145,6 +147,7 @@ func listHosts(alias string) {
 			AccessKey:   v.AccessKey,
 			SecretKey:   v.SecretKey,
 			API:         v.API,
+			Lookup:      v.Lookup,
 		})
 	}
 

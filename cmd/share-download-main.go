@@ -67,7 +67,7 @@ EXAMPLES:
 }
 
 // checkShareDownloadSyntax - validate command-line args.
-func checkShareDownloadSyntax(ctx *cli.Context) {
+func checkShareDownloadSyntax(ctx *cli.Context, encKeyDB map[string][]prefixSSEPair) {
 	args := ctx.Args()
 	if !args.Present() {
 		cli.ShowCommandHelpAndExit(ctx, "download", 1) // last argument is exit code.
@@ -90,11 +90,11 @@ func checkShareDownloadSyntax(ctx *cli.Context) {
 		fatalIf(errDummy().Trace(expiry.String()), "Expiry cannot be larger than 7 days.")
 	}
 
-	// Validate if object exists only if the `--recursive` option was NOT specified
+	// Validate if object exists only if the `--recursive` flag was NOT specified
 	isRecursive := ctx.Bool("recursive")
 	if !isRecursive {
 		for _, url := range ctx.Args() {
-			_, _, err := url2Stat(url)
+			_, _, err := url2Stat(url, false, encKeyDB)
 			if err != nil {
 				fatalIf(err.Trace(url), "Unable to stat `"+url+"`.")
 			}
@@ -127,7 +127,7 @@ func doShareDownloadURL(targetURL string, isRecursive bool, expiry time.Duration
 	// Channel which will receive objects whose URLs need to be shared
 	objectsCh := make(chan *clientContent)
 
-	content, err := clnt.Stat(isIncomplete, isFetchMeta)
+	content, err := clnt.Stat(isIncomplete, isFetchMeta, "")
 	if err != nil {
 		return err.Trace(clnt.GetURL().String())
 	}
@@ -193,9 +193,12 @@ func doShareDownloadURL(targetURL string, isRecursive bool, expiry time.Duration
 
 // main for share download.
 func mainShareDownload(ctx *cli.Context) error {
+	// Parse encryption keys per command.
+	encKeyDB, err := getEncKeys(ctx)
+	fatalIf(err, "Unable to parse encryption keys.")
 
 	// check input arguments.
-	checkShareDownloadSyntax(ctx)
+	checkShareDownloadSyntax(ctx, encKeyDB)
 
 	// Initialize share config folder.
 	initShareConfig()

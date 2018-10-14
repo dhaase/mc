@@ -101,7 +101,7 @@ func (a *accounter) Stat() accountStat {
 	a.finishOnce.Do(func() {
 		close(a.isFinished)
 		acntStat.Total = a.Total
-		acntStat.Transferred = a.current
+		acntStat.Transferred = atomic.LoadInt64(&a.current)
 		acntStat.Speed = a.write(atomic.LoadInt64(&a.current))
 	})
 	return acntStat
@@ -120,6 +120,11 @@ func (a *accounter) Update() {
 func (a *accounter) Set(n int64) *accounter {
 	atomic.StoreInt64(&a.current, n)
 	return a
+}
+
+// Get gets current value atomically
+func (a *accounter) Get() int64 {
+	return atomic.LoadInt64(&a.current)
 }
 
 // Add add to current value atomically.

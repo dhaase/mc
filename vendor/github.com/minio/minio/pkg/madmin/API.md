@@ -36,15 +36,13 @@ func main() {
 
 ```
 
-| Service operations|LockInfo operations|Healing operations|Config operations| Misc |
-|:---|:---|:---|:---|:---|
-|[`ServiceStatus`](#ServiceStatus)| [`ListLocks`](#ListLocks)| [`ListObjectsHeal`](#ListObjectsHeal)|[`GetConfig`](#GetConfig)| [`SetCredentials`](#SetCredentials)|
-|[`ServiceRestart`](#ServiceRestart)| [`ClearLocks`](#ClearLocks)| [`ListBucketsHeal`](#ListBucketsHeal)|[`SetConfig`](#SetConfig)||
-| | |[`HealBucket`](#HealBucket) |||
-| | |[`HealObject`](#HealObject)|||
-| | |[`HealFormat`](#HealFormat)|||
-| | |[`ListUploadsHeal`](#ListUploadsHeal)|||
-| | |[`HealUpload`](#HealUpload)|||
+| Service operations         | Info operations  | Healing operations                    | Config operations         | Misc                                |
+|:----------------------------|:----------------------------|:--------------------------------------|:--------------------------|:------------------------------------|
+| [`ServiceStatus`](#ServiceStatus) | [`ServerInfo`](#ServerInfo) | [`Heal`](#Heal) | [`GetConfig`](#GetConfig) | [`SetCredentials`](#SetCredentials) |
+| [`ServiceSendAction`](#ServiceSendAction) | | | [`SetConfig`](#SetConfig) | |
+| | |            | [`GetConfigKeys`](#GetConfigKeys) |                                     |
+| | |            | [`SetConfigKeys`](#SetConfigKeys) |                                     |
+
 
 ## 1. Constructor
 <a name="Minio"></a>
@@ -54,7 +52,6 @@ Initializes a new admin client object.
 
 __Parameters__
 
-
 |Param   |Type   |Description   |
 |:---|:---| :---|
 |`endpoint`   | _string_  |Minio endpoint.   |
@@ -62,8 +59,25 @@ __Parameters__
 |`secretAccessKey`  | _string_  |Secret key for the object storage endpoint.   |
 |`ssl`   | _bool_  | Set this value to 'true' to enable secure (HTTPS) access.  |
 
+## 2. Admin API Version
 
-## 2. Service operations
+<a name="VersionInfo"></a>
+### VersionInfo() (AdminAPIVersionInfo, error)
+Fetch server's supported Administrative API version.
+
+ __Example__
+
+``` go
+
+	info, err := madmClnt.VersionInfo()
+	if err != nil {
+		log.Fatalln(err)
+	}
+	log.Printf("%s\n", info.Version)
+
+```
+
+## 3. Service operations
 
 <a name="ServiceStatus"></a>
 ### ServiceStatus() (ServiceStatusMetadata, error)
@@ -78,21 +92,9 @@ Fetch service status, replies disk space used, backend type and total disks offl
 |---|---|---|
 |`st.ServerVersion.Version`  | _string_  | Server version. |
 |`st.ServerVersion.CommitID`  | _string_  | Server commit id. |
-|`st.StorageInfo.Total`  | _int64_  | Total disk space. |
-|`st.StorageInfo.Free`  | _int64_  | Free disk space. |
-|`st.StorageInfo.Backend`| _struct{}_ | Represents backend type embedded structure. |
-
-| Param | Type | Description |
-|---|---|---|
-|`backend.Type` | _BackendType_ | Type of backend used by the server currently only FS or Erasure. |
-|`backend.OnlineDisks`| _int_ | Total number of disks online (only applies to Erasure backend), is empty for FS. |
-|`backend.OfflineDisks` | _int_ | Total number of disks offline (only applies to Erasure backend), is empty for FS. |
-|`backend.ReadQuorum` | _int_ | Current total read quorum threshold before reads will be unavailable, is empty for FS. |
-|`backend.WriteQuorum` | _int_ | Current total write quorum threshold before writes will be unavailable, is empty for FS. |
-
+|`st.Uptime` | _time.Duration_ | Server uptime duration in seconds. |
 
  __Example__
-
 
  ```go
 
@@ -104,30 +106,88 @@ Fetch service status, replies disk space used, backend type and total disks offl
 
  ```
 
-<a name="ServiceRestart"></a>
-### ServiceRestart() (error)
-If successful restarts the running minio service, for distributed setup restarts all remote minio servers.
+<a name="ServiceSendAction"></a>
+### ServiceSendAction(act ServiceActionValue) (error)
+Sends a service action command to service - possible actions are restarting and stopping the server.
 
  __Example__
 
 
  ```go
-
-
-	st, err := madmClnt.ServiceRestart()
+        // to restart
+	st, err := madmClnt.ServiceSendAction(ServiceActionValueRestart)
+        // or to stop
+        // st, err := madmClnt.ServiceSendAction(ServiceActionValueStop)
 	if err != nil {
 		log.Fatalln(err)
 	}
 	log.Printf("Success")
-
  ```
 
-## 3. Info operations
+## 4. Info operations
 
 <a name="ServerInfo"></a>
 ### ServerInfo() ([]ServerInfo, error)
-Fetch all information for all cluster nodes, such as uptime, region, network statistics, etc..
+Fetches information for all cluster nodes, such as server properties, storage information, network statistics, etc.
 
+| Param | Type | Description |
+|---|---|---|
+|`si.Addr` | _string_ | Address of the server the following information is retrieved from. |
+|`si.ConnStats` | _ServerConnStats_ | Connection statistics from the given server. |
+|`si.HTTPStats` | _ServerHTTPStats_ | HTTP connection statistics from the given server. |
+|`si.Properties` | _ServerProperties_ | Server properties such as region, notification targets. |
+|`si.Data.StorageInfo.Total`  | _int64_  | Total disk space. |
+|`si.Data.StorageInfo.Free`  | _int64_  | Free disk space. |
+|`si.Data.StorageInfo.Backend`| _struct{}_ | Represents backend type embedded structure. |
+
+| Param | Type | Description |
+|---|---|---|
+|`ServerProperties.Uptime`| _time.Duration_ | Total duration in seconds since server is running. |
+|`ServerProperties.Version`| _string_ | Current server version. |
+|`ServerProperties.CommitID` | _string_ | Current server commitID. |
+|`ServerProperties.Region` | _string_ | Configured server region. |
+|`ServerProperties.SQSARN` | _[]string_ | List of notification target ARNs. |
+
+| Param | Type | Description |
+|---|---|---|
+|`ServerConnStats.TotalInputBytes` | _uint64_ | Total bytes received by the server. |
+|`ServerConnStats.TotalOutputBytes` | _uint64_ | Total bytes sent by the server. |
+
+| Param | Type | Description |
+|---|---|---|
+|`ServerHTTPStats.TotalHEADStats`| _ServerHTTPMethodStats_ | Total statistics regarding HEAD operations |
+|`ServerHTTPStats.SuccessHEADStats`| _ServerHTTPMethodStats_ | Total statistics regarding successful HEAD operations |
+|`ServerHTTPStats.TotalGETStats`| _ServerHTTPMethodStats_ |  Total statistics regarding GET operations |
+|`ServerHTTPStats.SuccessGETStats`| _ServerHTTPMethodStats_ | Total statistics regarding successful GET operations |
+|`ServerHTTPStats.TotalPUTStats`| _ServerHTTPMethodStats_ | Total statistics regarding PUT operations |
+|`ServerHTTPStats.SuccessPUTStats`| _ServerHTTPMethodStats_ | Total statistics regarding successful PUT operations |
+|`ServerHTTPStats.TotalPOSTStats`| _ServerHTTPMethodStats_ | Total statistics regarding POST operations |
+|`ServerHTTPStats.SuccessPOSTStats`| _ServerHTTPMethodStats_ | Total statistics regarding successful POST operations |
+|`ServerHTTPStats.TotalDELETEStats`| _ServerHTTPMethodStats_ | Total statistics regarding DELETE operations |
+|`ServerHTTPStats.SuccessDELETEStats`| _ServerHTTPMethodStats_ | Total statistics regarding successful DELETE operations |
+
+
+| Param | Type | Description |
+|---|---|---|
+|`ServerHTTPMethodStats.Count` | _uint64_ | Total number of operations. |
+|`ServerHTTPMethodStats.AvgDuration` | _string_ | Average duration of Count number of operations. |
+
+| Param | Type | Description |
+|---|---|---|
+|`Backend.Type` | _BackendType_ | Type of backend used by the server currently only FS or Erasure. |
+|`Backend.OnlineDisks`| _int_ | Total number of disks online (only applies to Erasure backend), is empty for FS. |
+|`Backend.OfflineDisks` | _int_ | Total number of disks offline (only applies to Erasure backend), is empty for FS. |
+|`Backend.StandardSCData` | _int_ | Data disks set for standard storage class, is empty for FS. |
+|`Backend.StandardSCParity` | _int_ | Parity disks set for standard storage class, is empty for FS. |
+|`Backend.RRSCData` | _int_ | Data disks set for reduced redundancy storage class, is empty for FS. |
+|`Backend.RRSCParity` | _int_ | Parity disks set for reduced redundancy storage class, is empty for FS. |
+|`Backend.Sets` | _[][]DriveInfo_ | Represents topology of drives in erasure coded sets. |
+
+| Param | Type | Description |
+|---|---|---|
+|`DriveInfo.UUID`| _string_ | Unique ID for each disk provisioned by server format. |
+|`DriveInfo.Endpoint` | _string_ | Endpoint location of the remote/local disk. |
+|`DriveInfo.State` | _string_ | Current state of the disk at endpoint. |
 
  __Example__
 
@@ -145,245 +205,71 @@ Fetch all information for all cluster nodes, such as uptime, region, network sta
  ```
 
 
-## 4. Lock operations
+## 6. Heal operations
 
-<a name="ListLocks"></a>
-### ListLocks(bucket, prefix string, duration time.Duration) ([]VolumeLockInfo, error)
-If successful returns information on the list of locks held on ``bucket`` matching ``prefix`` for  longer than ``duration`` seconds.
+<a name="Heal"></a>
+### Heal(bucket, prefix string, healOpts HealOpts, clientToken string, forceStart bool) (start HealStartSuccess, status HealTaskStatus, err error)
+
+Start a heal sequence that scans data under given (possible empty)
+`bucket` and `prefix`. The `recursive` bool turns on recursive
+traversal under the given path. `dryRun` does not mutate on-disk data,
+but performs data validation.
+
+Two heal sequences on overlapping paths may not be initiated.
+
+The progress of a heal should be followed using the same API `Heal`
+by providing the `clientToken` previously obtained from a `Heal`
+API. The server accumulates results of the heal traversal and waits
+for the client to receive and acknowledge them using the status
+request by providing `clientToken`.
 
 __Example__
 
 ``` go
-    volLocks, err := madmClnt.ListLocks("mybucket", "myprefix", 30 * time.Second)
+
+    opts := madmin.HealOpts{
+            Recursive: true,
+            DryRun:    false,
+    }
+    forceStart := false
+    healPath, err := madmClnt.Heal("", "", opts, "", forceStart)
     if err != nil {
         log.Fatalln(err)
     }
-    log.Println("List of locks: ", volLocks)
+    log.Printf("Heal sequence started at %s", healPath)
 
 ```
 
-<a name="ClearLocks"></a>
-### ClearLocks(bucket, prefix string, duration time.Duration) ([]VolumeLockInfo, error)
-If successful returns information on the list of locks cleared on ``bucket`` matching ``prefix`` for longer than ``duration`` seconds.
+#### HealStartSuccess structure
 
-__Example__
+| Param | Type | Description |
+|----|--------|--------|
+| s.ClientToken | _string_ | A unique token for a successfully started heal operation, this token is used to request realtime progress of the heal operation. |
+| s.ClientAddress | _string_ | Address of the client which initiated the heal operation, the client address has the form "host:port".|
+| s.StartTime | _time.Time_ | Time when heal was initially started.|
 
-``` go
-    volLocks, err := madmClnt.ClearLocks("mybucket", "myprefix", 30 * time.Second)
-    if err != nil {
-        log.Fatalln(err)
-    }
-    log.Println("List of locks cleared: ", volLocks)
+#### HealTaskStatus structure
 
-```
+| Param | Type | Description |
+|----|--------|--------|
+| s.Summary | _string_ | Short status of heal sequence |
+| s.FailureDetail | _string_ | Error message in case of heal sequence failure |
+| s.HealSettings | _HealOpts_ | Contains the booleans set in the `HealStart` call |
+| s.Items | _[]HealResultItem_ | Heal records for actions performed by server |
 
-## 5. Heal operations
+#### HealResultItem structure
 
-<a name="ListObjectsHeal"></a>
-### ListObjectsHeal(bucket, prefix string, recursive bool, doneCh <-chan struct{}) (<-chan ObjectInfo, error)
-If successful returns information on the list of objects that need healing in ``bucket`` matching ``prefix``.
+| Param | Type | Description |
+|------|-------|---------|
+| ResultIndex | _int64_ | Index of the heal-result record |
+| Type | _HealItemType_ | Represents kind of heal operation in the heal record |
+| Bucket | _string_ | Bucket name |
+| Object | _string_ | Object name |
+| Detail | _string_ | Details about heal operation |
+| DiskInfo.AvailableOn | _[]int_ | List of disks on which the healed entity is present and healthy |
+| DiskInfo.HealedOn | _[]int_ | List of disks on which the healed entity was restored |
 
-__Example__
-
-``` go
-    // Create a done channel to control 'ListObjectsHeal' go routine.
-    doneCh := make(chan struct{})
-
-    // Indicate to our routine to exit cleanly upon return.
-    defer close(doneCh)
-
-    // Set true if recursive listing is needed.
-    isRecursive := true
-    // List objects that need healing for a given bucket and
-    // prefix.
-    healObjectCh, err := madmClnt.ListObjectsHeal("mybucket", "myprefix", isRecursive, doneCh)
-    if err != nil {
-        fmt.Println(err)
-        return
-    }
-    for object := range healObjectsCh {
-        if object.Err != nil {
-            log.Fatalln(err)
-            return
-        }
-        if object.HealObjectInfo != nil {
-            switch healInfo := *object.HealObjectInfo; healInfo.Status {
-            case madmin.CanHeal:
-                fmt.Println(object.Key, " can be healed.")
-            case madmin.QuorumUnavailable:
-                fmt.Println(object.Key, " can't be healed until quorum is available.")
-            case madmin.Corrupted:
-                fmt.Println(object.Key, " can't be healed, not enough information.")
-            }
-        }
-        fmt.Println("object: ", object)
-    }
-```
-
-<a name="ListBucketsHeal"></a>
-### ListBucketsHeal() error
-If successful returns information on the list of buckets that need healing.
-
-__Example__
-
-``` go
-    // List buckets that need healing
-    healBucketsList, err := madmClnt.ListBucketsHeal()
-    if err != nil {
-        fmt.Println(err)
-        return
-    }
-    for bucket := range healBucketsList {
-        if bucket.HealBucketInfo != nil {
-            switch healInfo := *object.HealBucketInfo; healInfo.Status {
-            case madmin.CanHeal:
-                fmt.Println(bucket.Key, " can be healed.")
-            case madmin.QuorumUnavailable:
-                fmt.Println(bucket.Key, " can't be healed until quorum is available.")
-            case madmin.Corrupted:
-                fmt.Println(bucket.Key, " can't be healed, not enough information.")
-            }
-        }
-        fmt.Println("bucket: ", bucket)
-    }
-```
-
-<a name="HealBucket"></a>
-### HealBucket(bucket string, isDryRun bool) error
-If bucket is successfully healed returns nil, otherwise returns error indicating the reason for failure. If isDryRun is true, then the bucket is not healed, but heal bucket request is validated by the server. e.g, if the bucket exists, if bucket name is valid etc.
-
-__Example__
-
-``` go
-    isDryRun := false
-    err := madmClnt.HealBucket("mybucket", isDryRun)
-    if err != nil {
-        log.Fatalln(err)
-    }
-    log.Println("successfully healed mybucket")
-
-```
-
-<a name="HealObject"></a>
-### HealObject(bucket, object string, isDryRun bool) (HealResult, error)
-If object is successfully healed returns nil, otherwise returns error indicating the reason for failure. If isDryRun is true, then the object is not healed, but heal object request is validated by the server. e.g, if the object exists, if object name is valid etc.
-
-| Param  | Type  | Description  |
-|---|---|---|
-|`h.State` | _HealState_ | Represents the result of heal operation. It could be one of `HealNone`, `HealPartial` or `HealOK`. |
-
-
-| Value | Description |
-|---|---|
-|`HealNone` | Object/Upload wasn't healed on any of the disks |
-|`HealPartial` | Object/Upload was healed on some of the disks needing heal |
-| `HealOK` | Object/Upload was healed on all the disks needing heal |
-
-
-__Example__
-
-``` go
-    isDryRun = false
-    healResult, err := madmClnt.HealObject("mybucket", "myobject", isDryRun)
-    if err != nil {
-        log.Fatalln(err)
-    }
-
-    log.Println("Heal-object result: ", healResult)
-
-```
-
-<a name="HealFormat"></a>
-### HealFormat(isDryRun bool) error
-Heal storage format on available disks. This is used when disks were replaced or were found with missing format. This is supported only for erasure-coded backend.
-
-__Example__
-
-``` go
-    isDryRun := true
-    err := madmClnt.HealFormat(isDryRun)
-    if err != nil {
-        log.Fatalln(err)
-    }
-
-    isDryRun = false
-    err = madmClnt.HealFormat(isDryRun)
-    if err != nil {
-        log.Fatalln(err)
-    }
-
-    log.Println("successfully healed storage format on available disks.")
-
-```
-<a name="ListUploadsHeal"> </a>
-### ListUploadsHeal(bucket, prefix string, recursive bool, doneCh <-chan struct{}) (<-chan UploadInfo, error)
-List ongoing multipart uploads that need healing.
-
-| Param  | Type  | Description  |
-|---|---|---|
-|`ui.Key` | _string_ | Name of the object being uploaded |
-|`ui.UploadID` | _string_ | UploadID of the ongoing multipart upload |
-|`ui.HealUploadInfo.Status` | _HealStatus_| One of `Healthy`, `CanHeal`, `Corrupted`, `QuorumUnavailable`|
-|`ui.Err`| _error_ | non-nil if fetching fetching healing information failed |
-
-__Example__
-
-``` go
-
-    // Set true if recursive listing is needed.
-    isRecursive := true
-    // List objects that need healing for a given bucket and
-    // prefix.
-    healUploadsCh, err := madmClnt.ListUploadsHeal(bucket, prefix, isRecursive, doneCh)
-    if err != nil {
-        log.Fatalln("Failed to get list of uploads to be healed: ", err)
-    }
-
-    for upload := range healUploadsCh {
-        if upload.Err != nil {
-            log.Println("upload listing error: ", upload.Err)
-        }
-
-        if upload.HealUploadInfo != nil {
-            switch healInfo := *upload.HealUploadInfo; healInfo.Status {
-            case madmin.CanHeal:
-                fmt.Println(upload.Key, " can be healed.")
-            case madmin.QuorumUnavailable:
-                fmt.Println(upload.Key, " can't be healed until quorum is available.")
-            case madmin.Corrupted:
-                fmt.Println(upload.Key, " can't be healed, not enough information.")
-            }
-        }
-    }
-
-```
-
-<a name="HealUpload"></a>
-### HealUpload(bucket, object, uploadID string, isDryRun bool) (HealResult, error)
-If upload is successfully healed returns nil, otherwise returns error indicating the reason for failure. If isDryRun is true, then the upload is not healed, but heal upload request is validated by the server. e.g, if the upload exists, if upload name is valid etc.
-
-| Param  | Type  | Description  |
-|---|---|---|
-|`h.State` | _HealState_ | Represents the result of heal operation. It could be one of `HealNone`, `HealPartial` or `HealOK`. |
-
-
-| Value | Description |
-|---|---|
-| `HealNone` | Object/Upload wasn't healed on any of the disks |
-| `HealPartial` | Object/Upload was healed on some of the disks needing heal |
-| `HealOK` | Object/Upload was healed on all the disks needing heal |
-
-``` go
-    isDryRun = false
-    healResult, err := madmClnt.HealUpload("mybucket", "myobject", "myUploadID", isDryRun)
-    if err != nil {
-        log.Fatalln(err)
-    }
-
-    log.Println("Heal-upload result: ", healResult)
-```
-
-## 6. Config operations
+## 7. Config operations
 
 <a name="GetConfig"></a>
 ### GetConfig() ([]byte, error)
@@ -442,10 +328,50 @@ __Example__
     log.Println("SetConfig: ", string(buf.Bytes()))
 ```
 
-## 7. Misc operations
+<a name="GetConfigKeys"></a>
+### GetConfigKeys(keys []string) ([]byte, error)
+Get a json document which contains a set of keys and their values from config.json.
+
+__Example__
+
+``` go
+    configBytes, err := madmClnt.GetConfigKeys([]string{"version", "notify.amqp.1"})
+    if err != nil {
+        log.Fatalf("failed due to: %v", err)
+    }
+
+    // Pretty-print config received as json.
+    var buf bytes.Buffer
+    err = json.Indent(buf, configBytes, "", "\t")
+    if err != nil {
+        log.Fatalf("failed due to: %v", err)
+    }
+
+    log.Println("config received successfully: ", string(buf.Bytes()))
+```
+
+
+<a name="SetConfigKeys"></a>
+### SetConfigKeys(params map[string]string) error
+Set a set of keys and values for Minio server or distributed setup and restart the Minio
+server for the new configuration changes to take effect.
+
+__Example__
+
+``` go
+    err := madmClnt.SetConfigKeys(map[string]string{"notify.webhook.1": "{\"enable\": true, \"endpoint\": \"http://example.com/api\"}"})
+    if err != nil {
+        log.Fatalf("failed due to: %v", err)
+    }
+
+    log.Println("New configuration successfully set")
+```
+
+
+
+## 8. Misc operations
 
 <a name="SetCredentials"></a>
-
 ### SetCredentials() error
 Set new credentials of a Minio setup.
 
@@ -459,4 +385,3 @@ __Example__
     log.Println("New credentials successfully set.")
 
 ```
-

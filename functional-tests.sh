@@ -32,6 +32,9 @@
 #
 ################################################################################
 
+# Force bytewise sorting for CLI tools
+LANG=C
+
 if [ -n "$MINT_MODE" ]; then
     if [ -z "${MINT_DATA_DIR+x}" ]; then
         echo "MINT_DATA_DIR not defined"
@@ -77,6 +80,8 @@ if [ "$ENABLE_HTTPS" != "1" ]; then
 fi
 
 SERVER_ALIAS="myminio"
+SERVER_ALIAS_TLS="myminio-ssl"
+
 BUCKET_NAME="mc-test-bucket-$RANDOM"
 WATCH_OUT_FILE="$WORK_DIR/watch.out-$RANDOM"
 
@@ -124,7 +129,19 @@ function show()
     fi
 }
 
-function fail()
+function show_on_success()
+{
+    rv="$1"
+    shift
+
+    if [ "$rv" -eq 0 ]; then
+        echo "$@"
+    fi
+
+    return "$rv"
+}
+
+function show_on_failure()
 {
     rv="$1"
     shift
@@ -277,6 +294,31 @@ function test_put_object_multipart()
     log_success "$start_time" "${FUNCNAME[0]}"
 }
 
+## Test mc cp command with storage-class flag set
+function test_put_object_with_storage_class()
+{
+    show "${FUNCNAME[0]}"
+
+    start_time=$(get_time)
+    object_name="mc-test-object-$RANDOM"
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd cp --storage-class REDUCED_REDUNDANCY "${FILE_1_MB}" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd rm "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
+
+    log_success "$start_time" "${FUNCNAME[0]}"
+}
+
+## Test mc cp command with storage-class flag set to incorrect value
+function test_put_object_with_storage_class_error()
+{
+    show "${FUNCNAME[0]}"
+
+    start_time=$(get_time)
+    object_name="mc-test-object-$RANDOM"
+    assert_failure "$start_time" "${FUNCNAME[0]}" mc_cmd cp --storage-class REDUCED "${FILE_1_MB}" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
+
+    log_success "$start_time" "${FUNCNAME[0]}"
+}
+
 function test_get_object()
 {
     show "${FUNCNAME[0]}"
@@ -305,6 +347,39 @@ function test_get_object_multipart()
     log_success "$start_time" "${FUNCNAME[0]}"
 }
 
+function test_presigned_post_policy_error()
+{
+    show "${FUNCNAME[0]}"
+
+    start_time=$(get_time)
+    object_name="mc-test-object-$RANDOM"
+
+    out=$("${MC_CMD[@]}" --json share upload "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}")
+    assert_success "$start_time" "${FUNCNAME[0]}" show_on_failure $? "unable to get presigned post policy and put object url"
+
+    # Extract share field of json output, and append object name to the URL
+    upload=$(echo "$out" | jq -r .share | sed "s|<FILE>|$FILE_1_MB|g" | sed "s|curl|curl -sS|g" | sed "s|${ENDPOINT}/${BUCKET_NAME}/|${ENDPOINT}/${BUCKET_NAME}/${object_name}|g")
+
+    # In case of virtual host style URL path, the previous replace would have failed.
+    # One of the following two commands will append the object name in that scenario.
+    upload=$(echo "$upload" | sed "s|http://${BUCKET_NAME}.${SERVER_ENDPOINT}/|http://${BUCKET_NAME}.${SERVER_ENDPOINT}/${object_name}|g")
+    upload=$(echo "$upload" | sed "s|https://${BUCKET_NAME}.${SERVER_ENDPOINT}/|https://${BUCKET_NAME}.${SERVER_ENDPOINT}/${object_name}|g")
+
+    ret=$($upload 2>&1 | grep -oP '(?<=Code>)[^<]+')
+    # Check if the command execution failed.
+    assert_success "$start_time" "${FUNCNAME[0]}" show_on_failure $? "unknown failure in upload of $FILE_1_MB using presigned post policy"
+    if [ -z "$ret" ]; then
+
+    # Check if the upload succeeded. We expect it to fail.
+    assert_failure "$start_time" "${FUNCNAME[0]}" show_on_success 0 "upload of $FILE_1_MB using presigned post policy should have failed"
+    fi
+
+    if [ "$ret" != "MethodNotAllowed" ]; then
+    assert_failure "$start_time" "${FUNCNAME[0]}" show_on_success 0 "upload of $FILE_1_MB using presigned post policy should have failed with MethodNotAllowed error, instead failed with $ret error"
+    fi
+    log_success "$start_time" "${FUNCNAME[0]}"
+}
+
 function test_presigned_put_object()
 {
     show "${FUNCNAME[0]}"
@@ -313,10 +388,10 @@ function test_presigned_put_object()
     object_name="mc-test-object-$RANDOM"
 
     out=$("${MC_CMD[@]}" --json share upload "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}")
-    assert_success "$start_time" "${FUNCNAME[0]}" fail $? "unable to get presigned put object url"
+    assert_success "$start_time" "${FUNCNAME[0]}" show_on_failure $? "unable to get presigned put object url"
     upload=$(echo "$out" | jq -r .share | sed "s|<FILE>|$FILE_1_MB|g" | sed "s|curl|curl -sS|g")
     $upload >/dev/null 2>&1
-    assert_success "$start_time" "${FUNCNAME[0]}" fail $? "unable to upload $FILE_1_MB presigned put object url"
+    assert_success "$start_time" "${FUNCNAME[0]}" show_on_failure $? "unable to upload $FILE_1_MB presigned put object url"
 
     assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd cp "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}" "${object_name}.downloaded"
     assert_success "$start_time" "${FUNCNAME[0]}" check_md5sum "$FILE_65_MB_MD5SUM" "${object_name}.downloaded"
@@ -334,10 +409,10 @@ function test_presigned_get_object()
     assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd cp "${FILE_1_MB}" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
 
     out=$("${MC_CMD[@]}" --json share download "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}")
-    assert_success "$start_time" "${FUNCNAME[0]}" fail $? "unable to get presigned get object url"
+    assert_success "$start_time" "${FUNCNAME[0]}" show_on_failure $? "unable to get presigned get object url"
     download_url=$(echo "$out" | jq -r .share)
     curl --output "${object_name}.downloaded" -sS -X GET "$download_url"
-    assert_success "$start_time" "${FUNCNAME[0]}" fail $? "unable to download $download_url"
+    assert_success "$start_time" "${FUNCNAME[0]}" show_on_failure $? "unable to download $download_url"
 
     assert_success "$start_time" "${FUNCNAME[0]}" check_md5sum "$FILE_1_MB_MD5SUM" "${object_name}.downloaded"
     assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd rm "${object_name}.downloaded" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
@@ -353,7 +428,7 @@ function test_cat_object()
     object_name="mc-test-object-$RANDOM"
     assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd cp "${FILE_1_MB}" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
     "${MC_CMD[@]}" cat "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}" > "${object_name}.downloaded"
-    assert_success "$start_time" "${FUNCNAME[0]}" fail $? "unable to download object using 'mc cat'"
+    assert_success "$start_time" "${FUNCNAME[0]}" show_on_failure $? "unable to download object using 'mc cat'"
     assert_success "$start_time" "${FUNCNAME[0]}" check_md5sum "$FILE_1_MB_MD5SUM" "${object_name}.downloaded"
     assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd rm "${object_name}.downloaded" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
 
@@ -371,7 +446,26 @@ function test_mirror_list_objects()
     assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd mirror "$DATA_DIR" "${SERVER_ALIAS}/${bucket_name}"
 
     diff -bB <(ls "$DATA_DIR") <("${MC_CMD[@]}" --json ls "${SERVER_ALIAS}/${bucket_name}" | jq -r .key) >/dev/null 2>&1
-    assert_success "$start_time" "${FUNCNAME[0]}" fail $? "mirror and list differs"
+    assert_success "$start_time" "${FUNCNAME[0]}" show_on_failure $? "mirror and list differs"
+
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd rm --force --recursive "${SERVER_ALIAS}/${bucket_name}"
+
+    log_success "$start_time" "${FUNCNAME[0]}"
+}
+
+## Tests mc mirror command with --storage-class flag set
+function test_mirror_list_objects_storage_class()
+{
+    show "${FUNCNAME[0]}"
+
+    start_time=$(get_time)
+    bucket_name="mc-test-bucket-$RANDOM"
+    object_name="mc-test-object-$RANDOM"
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd mb "${SERVER_ALIAS}/${bucket_name}"
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd mirror --storage-class REDUCED_REDUNDANCY "$DATA_DIR" "${SERVER_ALIAS}/${bucket_name}"
+
+    diff -bB <(ls "$DATA_DIR") <("${MC_CMD[@]}" --json ls "${SERVER_ALIAS}/${bucket_name}" | jq -r .key) >/dev/null 2>&1
+    assert_success "$start_time" "${FUNCNAME[0]}" show_on_failure $? "mirror and list differs"
 
     assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd rm --force --recursive "${SERVER_ALIAS}/${bucket_name}"
 
@@ -389,7 +483,7 @@ function test_find_empty() {
 
     # find --older 1 day should be empty, so we compare with empty string.
     diff -bB <(echo "") <("${MC_CMD[@]}" --json find "${SERVER_ALIAS}/${bucket_name}" --older 1d | jq -r .key | sed "s/${SERVER_ALIAS}\/${bucket_name}\///g") >/dev/null 2>&1
-    assert_success "$start_time" "${FUNCNAME[0]}" fail $? "mirror and list differs"
+    assert_success "$start_time" "${FUNCNAME[0]}" show_on_failure $? "mirror and list differs"
 
     assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd rm --force --recursive "${SERVER_ALIAS}/${bucket_name}"
 
@@ -405,8 +499,8 @@ function test_find() {
     assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd mb "${SERVER_ALIAS}/${bucket_name}"
     assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd mirror "$DATA_DIR" "${SERVER_ALIAS}/${bucket_name}"
 
-    diff -bB <(ls "$DATA_DIR") <("${MC_CMD[@]}" --json find "${SERVER_ALIAS}/${bucket_name}" | jq -r .key | sed "s/${SERVER_ALIAS}\/${bucket_name}\///g") >/dev/null 2>&1
-    assert_success "$start_time" "${FUNCNAME[0]}" fail $? "mirror and list differs"
+    diff -bB <(ls "$DATA_DIR") <("${MC_CMD[@]}" --json find "${SERVER_ALIAS}/${bucket_name}/" | jq -r .key | sed "s/${SERVER_ALIAS}\/${bucket_name}\///g") >/dev/null 2>&1
+    assert_success "$start_time" "${FUNCNAME[0]}" show_on_failure $? "mirror and list differs"
 
     assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd rm --force --recursive "${SERVER_ALIAS}/${bucket_name}"
 
@@ -437,7 +531,7 @@ function test_watch_object()
     sleep 1
     if ! jq -r .events.type "$WATCH_OUT_FILE" | grep -qi ObjectCreated; then
         kill "$watch_cmd_pid"
-        assert_success "$start_time" "${FUNCNAME[0]}" fail 1 "ObjectCreated event not found"
+        assert_success "$start_time" "${FUNCNAME[0]}" show_on_failure 1 "ObjectCreated event not found"
     fi
 
     ( assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd rm "${SERVER_ALIAS}/${bucket_name}/${object_name}" )
@@ -450,7 +544,7 @@ function test_watch_object()
     sleep 1
     if ! jq -r .events.type "$WATCH_OUT_FILE" | grep -qi ObjectRemoved; then
         kill "$watch_cmd_pid"
-        assert_success "$start_time" "${FUNCNAME[0]}" fail 1 "ObjectRemoved event not found"
+        assert_success "$start_time" "${FUNCNAME[0]}" show_on_failure 1 "ObjectRemoved event not found"
     fi
 
     kill "$watch_cmd_pid"
@@ -466,6 +560,8 @@ function test_config_host_add()
 
     assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd config host add "${SERVER_ALIAS}1" "$ENDPOINT" "$ACCESS_KEY" "$SECRET_KEY"
     assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd config host list "${SERVER_ALIAS}1"
+
+    log_success "$start_time" "${FUNCNAME[0]}"
 }
 
 function test_config_host_add_error()
@@ -474,11 +570,210 @@ function test_config_host_add_error()
     start_time=$(get_time)
 
     out=$("${MC_CMD[@]}" --json config host add "${SERVER_ALIAS}1" "$ENDPOINT" "$ACCESS_KEY" "invalid-secret")
-    assert_failure "$start_time" "${FUNCNAME[0]}" fail $? "adding host should fail"
+    assert_failure "$start_time" "${FUNCNAME[0]}" show_on_success $? "adding host should fail"
     got_code=$(echo "$out" | jq -r .error.cause.error.Code)
     if [ "${got_code}" != "SignatureDoesNotMatch" ]; then
-        assert_failure "$start_time" "${FUNCNAME[0]}" fail 1 "incorrect error code ${got_code} returned by server"
+        assert_failure "$start_time" "${FUNCNAME[0]}" show_on_failure 1 "incorrect error code ${got_code} returned by server"
     fi
+
+    log_success "$start_time" "${FUNCNAME[0]}"
+}
+
+function test_put_object_with_sse()
+{
+    show "${FUNCNAME[0]}"
+    start_time=$(get_time)
+    object_name="mc-test-object-$RANDOM"
+    cli_flag="${SERVER_ALIAS}/${BUCKET_NAME}=32byteslongsecretkeymustbegiven1"
+    # put encrypted object; then delete with correct secret key
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd cp --encrypt-key "${cli_flag}" "${FILE_1_MB}" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd rm --encrypt-key "${cli_flag}" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
+    log_success "$start_time" "${FUNCNAME[0]}"
+}
+
+function test_put_object_with_sse_error()
+{
+    show "${FUNCNAME[0]}"
+    start_time=$(get_time)
+    object_name="mc-test-object-$RANDOM"
+    cli_flag="${SERVER_ALIAS}/${BUCKET_NAME}=32byteslongsecretkeymustbegiven"
+    # put object with invalid encryption key; should fail
+    assert_failure "$start_time" "${FUNCNAME[0]}" mc_cmd cp --encrypt-key "${cli_flag}" "${FILE_1_MB}" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
+    log_success "$start_time" "${FUNCNAME[0]}"
+}
+
+function test_cat_object_with_sse()
+{
+    show "${FUNCNAME[0]}"
+    start_time=$(get_time)
+    object_name="mc-test-object-$RANDOM"
+    cli_flag="${SERVER_ALIAS}/${BUCKET_NAME}=32byteslongsecretkeymustbegiven1"
+    # put encrypted object; then cat object correct secret key
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd cp  --encrypt-key "${cli_flag}" "${FILE_1_MB}" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd cat --encrypt-key "${cli_flag}" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
+    log_success "$start_time" "${FUNCNAME[0]}"
+}
+
+function test_cat_object_with_sse_error()
+{
+    show "${FUNCNAME[0]}"
+    start_time=$(get_time)
+    object_name="mc-test-object-$RANDOM"
+    cli_flag="${SERVER_ALIAS}/${BUCKET_NAME}=32byteslongsecretkeymustbegiven1"
+    # put encrypted object; then cat object with no secret key
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd cp  --encrypt-key "${cli_flag}" "${FILE_1_MB}" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
+    assert_failure "$start_time" "${FUNCNAME[0]}" mc_cmd cat  "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
+    log_success "$start_time" "${FUNCNAME[0]}"
+}
+
+function test_copy_object_with_sse()
+{
+    # test server side copy and remove operation - target is unencrypted while source is encrypted
+    show "${FUNCNAME[0]}"
+    start_time=$(get_time)
+    prefix="prefix"
+    object_name="mc-test-object-$RANDOM"
+
+    cli_flag="${SERVER_ALIAS}/${BUCKET_NAME}/${prefix}=32byteslongsecretkeymustbegiven1"
+    # create encrypted object on server
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd cp --encrypt-key "${cli_flag}" "${FILE_1_MB}" "${SERVER_ALIAS}/${BUCKET_NAME}/${prefix}/${object_name}"
+    # now do a server side copy and store it unencrypted.
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd cp --encrypt-key "${cli_flag}" "${SERVER_ALIAS}/${BUCKET_NAME}/${prefix}/${object_name}" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
+    # cat the unencrypted destination object. should return data without any error
+    assert_success "$start_time" "${FUNCNAME[0]}" "${MC_CMD[@]}" cat "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}" > "${object_name}.downloaded"
+    assert_success "$start_time" "${FUNCNAME[0]}" show_on_failure $? "unable to download object using 'mc cat'"
+    assert_success "$start_time" "${FUNCNAME[0]}" check_md5sum "$FILE_1_MB_MD5SUM" "${object_name}.downloaded"
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd rm "${object_name}.downloaded"
+    # mc rm on encrypted object without encryption key should fail
+    assert_failure "$start_time" "${FUNCNAME[0]}" mc_cmd rm "${SERVER_ALIAS}/${BUCKET_NAME}/${prefix}/${object_name}"
+    # mc rm on encrypted object with encryption key should pass
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd rm --encrypt-key "${cli_flag}" "${SERVER_ALIAS}/${BUCKET_NAME}/${prefix}/${object_name}"
+    # mc rm on unencrypted destination object should pass
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd rm  "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
+
+    log_success "$start_time" "${FUNCNAME[0]}"
+}
+
+function test_copy_object_with_sse2()
+{
+    # test server side copy and remove operation - target is encrypted with different key
+    show "${FUNCNAME[0]}"
+    start_time=$(get_time)
+    prefix="prefix"
+    object_name="mc-test-object-$RANDOM"
+
+    cli_flag1="${SERVER_ALIAS}/${BUCKET_NAME}/${prefix}=32byteslongsecretkeymustbegiven1"
+    cli_flag2="${SERVER_ALIAS}/${BUCKET_NAME}=32byteslongsecretkeymustbegiven2"
+
+    # create encrypted object on server
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd cp --encrypt-key "${cli_flag1}" "${FILE_1_MB}" "${SERVER_ALIAS}/${BUCKET_NAME}/${prefix}/${object_name}"
+    # now do a server side copy and store it eith different encryption key.
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd cp --encrypt-key "${cli_flag1},${cli_flag2}"  "${SERVER_ALIAS}/${BUCKET_NAME}/${prefix}/${object_name}" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
+    # cat the destination object with the new key. should return data without any error
+    assert_success "$start_time" "${FUNCNAME[0]}" "${MC_CMD[@]}" cat --encrypt-key "${cli_flag2}" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}" > "${object_name}.downloaded"
+    assert_success "$start_time" "${FUNCNAME[0]}" show_on_failure $? "unable to download object using 'mc cat'"
+    assert_success "$start_time" "${FUNCNAME[0]}" check_md5sum "$FILE_1_MB_MD5SUM" "${object_name}.downloaded"
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd rm "${object_name}.downloaded"
+    # mc rm on src object with first encryption key should pass
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd rm --encrypt-key "${cli_flag1}" "${SERVER_ALIAS}/${BUCKET_NAME}/${prefix}/${object_name}"
+    # mc rm on encrypted destination object  with second encryption key should pass
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd rm  --encrypt-key "${cli_flag2}" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
+
+    log_success "$start_time" "${FUNCNAME[0]}"
+}
+
+function test_sse_key_rotation()
+{
+    # test server side copy and remove operation - target is encrypted with different key
+    show "${FUNCNAME[0]}"
+    start_time=$(get_time)
+    prefix="prefix"
+    object_name="mc-test-object-$RANDOM"
+    old_key="32byteslongsecretkeymustbegiven1"
+    new_key="32byteslongsecretkeymustbegiven2"
+    cli_flag1="${SERVER_ALIAS}/${BUCKET_NAME}/${prefix}=${old_key}"
+    cli_flag2="${SERVER_ALIAS_TLS}/${BUCKET_NAME}=${new_key}"
+
+    # create encrypted object on server
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd cp --encrypt-key "${cli_flag1}" "${FILE_1_MB}" "${SERVER_ALIAS}/${BUCKET_NAME}/${prefix}/${object_name}"
+    # now do a server side copy on same object and do a key rotation
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd cp --encrypt-key "${cli_flag1},${cli_flag2}"  "${SERVER_ALIAS}/${BUCKET_NAME}/${prefix}/${object_name}" "${SERVER_ALIAS_TLS}/${BUCKET_NAME}/${object_name}"
+    # cat the object with the new key. should return data without any error
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd cat --encrypt-key "${cli_flag2}" "${SERVER_ALIAS_TLS}/${BUCKET_NAME}/${object_name}" > "${object_name}.downloaded"
+    assert_success "$start_time" "${FUNCNAME[0]}" show_on_failure $? "unable to download object using 'mc cat'"
+    assert_success "$start_time" "${FUNCNAME[0]}" check_md5sum "$FILE_1_MB_MD5SUM" "${object_name}.downloaded"
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd rm "${object_name}.downloaded"
+    # mc rm on object with old key should fail
+    assert_failure "$start_time" "${FUNCNAME[0]}" mc_cmd rm --encrypt-key "${cli_flag1}" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
+    # mc rm on encrypted object with second encryption key should pass
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd rm  --encrypt-key "${cli_flag2}" "${SERVER_ALIAS_TLS}/${BUCKET_NAME}/${object_name}"
+
+    log_success "$start_time" "${FUNCNAME[0]}"
+}
+
+function test_mirror_with_sse()
+{
+    # test if mirror operation works with encrypted objects
+    show "${FUNCNAME[0]}"
+
+    start_time=$(get_time)
+    bucket_name="mc-test-bucket-$RANDOM"
+    cli_flag="${SERVER_ALIAS}/${bucket_name}=32byteslongsecretkeymustbegiven1"
+
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd mb "${SERVER_ALIAS}/${bucket_name}"
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd mirror --encrypt-key "${cli_flag}" "$DATA_DIR" "${SERVER_ALIAS}/${bucket_name}"
+    diff -bB <(ls "$DATA_DIR") <("${MC_CMD[@]}" --json ls "${SERVER_ALIAS}/${bucket_name}" | jq -r .key) >/dev/null 2>&1
+    assert_success "$start_time" "${FUNCNAME[0]}" show_on_failure $? "mirror and list differs"
+    # remove recursively with correct encryption key
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd rm --force --recursive --encrypt-key "${cli_flag}" "${SERVER_ALIAS}/${bucket_name}"
+
+    log_success "$start_time" "${FUNCNAME[0]}"
+}
+
+function test_rm_object_with_sse()
+{
+    show "${FUNCNAME[0]}"
+
+    # test whether remove fails for encrypted object if secret key not provided.
+    start_time=$(get_time)
+    object_name="mc-test-object-$RANDOM"
+    cli_flag="${SERVER_ALIAS}/${BUCKET_NAME}=32byteslongsecretkeymustbegiven1"
+
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd cp --encrypt-key "${cli_flag}" "${FILE_1_MB}" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
+    assert_failure "$start_time" "${FUNCNAME[0]}" mc_cmd rm "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd rm --encrypt-key "${cli_flag}" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
+
+    log_success "$start_time" "${FUNCNAME[0]}"
+}
+
+function test_get_object_with_sse()
+{
+    show "${FUNCNAME[0]}"
+
+    start_time=$(get_time)
+    object_name="mc-test-object-$RANDOM"
+    cli_flag="${SERVER_ALIAS}/${BUCKET_NAME}=32byteslongsecretkeymustbegiven1"
+
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd cp --encrypt-key "${cli_flag}" "${FILE_1_MB}" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd cp --encrypt-key "${cli_flag}" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}" "${object_name}.downloaded"
+    assert_success "$start_time" "${FUNCNAME[0]}" check_md5sum "$FILE_1_MB_MD5SUM" "${object_name}.downloaded"
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd rm --encrypt-key "${cli_flag}" "${object_name}.downloaded" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
+
+    log_success "$start_time" "${FUNCNAME[0]}"
+}
+
+function test_put_object_multipart_sse()
+{
+    show "${FUNCNAME[0]}"
+
+    start_time=$(get_time)
+    object_name="mc-test-object-$RANDOM"
+    cli_flag="${SERVER_ALIAS}/${BUCKET_NAME}=32byteslongsecretkeymustbegiven1"
+
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd cp --encrypt-key "${cli_flag}" "${FILE_65_MB}" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd rm --encrypt-key "${cli_flag}" "${SERVER_ALIAS}/${BUCKET_NAME}/${object_name}"
+
+    log_success "$start_time" "${FUNCNAME[0]}"
 }
 
 function run_test()
@@ -490,17 +785,35 @@ function run_test()
 
     test_put_object
     test_put_object_error
+    test_put_object_with_storage_class
+    test_put_object_with_storage_class_error
     test_put_object_multipart
     test_get_object
     test_get_object_multipart
+    test_presigned_post_policy_error
     test_presigned_put_object
     test_presigned_get_object
     test_cat_object
     test_mirror_list_objects
+    test_mirror_list_objects_storage_class
     test_find
     test_find_empty
     if [ -z "$MINT_MODE" ]; then
         test_watch_object
+    fi
+
+    if [ "$ENABLE_HTTPS" == "1" ]; then
+        test_put_object_with_sse
+        test_put_object_with_sse_error
+        test_put_object_multipart_sse
+        test_get_object_with_sse
+        test_cat_object_with_sse
+        test_cat_object_with_sse_error
+        test_copy_object_with_sse
+        test_copy_object_with_sse2
+        test_sse_key_rotation
+        test_mirror_with_sse
+        test_rm_object_with_sse
     fi
 
     test_config_host_add
@@ -556,8 +869,9 @@ function __init__()
         echo "unable to get md5sum of $FILE_65_MB"
         exit 1
     fi
-
     assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd config host add "${SERVER_ALIAS}" "$ENDPOINT" "$ACCESS_KEY" "$SECRET_KEY"
+    assert_success "$start_time" "${FUNCNAME[0]}" mc_cmd config host add "${SERVER_ALIAS_TLS}" "$ENDPOINT" "$ACCESS_KEY" "$SECRET_KEY"
+
     set +e
 }
 

@@ -1,5 +1,5 @@
 # Minio Client Quickstart Guide
-[![Slack](https://slack.minio.io/slack?type=svg)](https://slack.minio.io) [![Go Report Card](https://goreportcard.com/badge/minio/mc)](https://goreportcard.com/report/minio/mc) [![Docker Pulls](https://img.shields.io/docker/pulls/minio/mc.svg?maxAge=604800)](https://hub.docker.com/r/minio/mc/) [![Snap Status](https://build.snapcraft.io/badge/minio/mc.svg)](https://build.snapcraft.io/user/minio/mc)
+[![Slack](https://slack.minio.io/slack?type=svg)](https://slack.minio.io) [![Go Report Card](https://goreportcard.com/badge/minio/mc)](https://goreportcard.com/report/minio/mc) [![Docker Pulls](https://img.shields.io/docker/pulls/minio/mc.svg?maxAge=604800)](https://hub.docker.com/r/minio/mc/)
 
 Minio Client (mc) provides a modern alternative to UNIX commands like ls, cat, cp, mirror, diff, find etc. It supports filesystems and Amazon S3 compatible cloud storage service (AWS Signature v2 and v4).
 
@@ -12,6 +12,7 @@ share    Generate URL for sharing.
 cp       Copy files and objects.
 mirror   Mirror buckets and folders.
 find     Finds files which match the given set of parameters.
+stat     Stat contents of objects and folders.
 diff     List objects with size difference or missing between two folders or buckets.
 rm       Remove files and objects.
 events   Manage object notifications.
@@ -60,6 +61,7 @@ mc --help
 |GNU/Linux|64-bit Intel|https://dl.minio.io/client/mc/release/linux-amd64/mc |
 
 ```sh
+wget https://dl.minio.io/client/mc/release/linux-amd64/mc
 chmod +x mc
 ./mc --help
 ```
@@ -73,15 +75,6 @@ chmod +x mc
 ```sh
 mc.exe --help
 ```
-
-### Snap
-You can install the latest `minio-client` [snap](https://snapcraft.io), and help testing the most recent changes of the master branch in [all the supported Linux distros](https://snapcraft.io/docs/core/install) with:
-
-```sh
-sudo snap install minio-client --edge --devmode
-```
-
-Every time a new version is pushed to the store, you will get it updated automatically.
 
 ## Install from Source
 Source installation is intended only for developers and advanced users. `mc update` command does not support update notifications for source based installations. Please download official releases from https://minio.io/downloads/#minio-client.
@@ -100,30 +93,32 @@ If you are planning to use `mc` only on POSIX compatible filesystems, you may sk
 To add one or more Amazon S3 compatible hosts, please follow the instructions below. `mc` stores all its configuration information in ``~/.mc/config.json`` file.
 
 ```sh
-mc config host add <ALIAS> <YOUR-S3-ENDPOINT> <YOUR-ACCESS-KEY> <YOUR-SECRET-KEY> <API-SIGNATURE>
+mc config host add <ALIAS> <YOUR-S3-ENDPOINT> <YOUR-ACCESS-KEY> <YOUR-SECRET-KEY> --api <API-SIGNATURE> --lookup <BUCKET-LOOKUP-TYPE>
 ```
 
 Alias is simply a short name to your cloud storage service. S3 end-point, access and secret keys are supplied by your cloud storage provider. API signature is an optional argument. By default, it is set to "S3v4".
+
+Lookup is an optional argument. It is used to indicate whether dns or path style url requests are supported by the server. It accepts "dns", "path" or "auto" as valid values. By default, it is set to "auto" and SDK automatically determines the type of url lookup to use.
 
 ### Example - Minio Cloud Storage
 Minio server displays URL, access and secret keys.
 
 ```sh
-mc config host add minio http://192.168.1.51 BKIKJAA5BMMU2RHO6IBB V7f1CwQqAcwo80UEIJEjc5gVQUSSx5ohQ9GSrr12 S3v4
+mc config host add minio http://192.168.1.51 BKIKJAA5BMMU2RHO6IBB V7f1CwQqAcwo80UEIJEjc5gVQUSSx5ohQ9GSrr12
 ```
 
 ### Example - Amazon S3 Cloud Storage
 Get your AccessKeyID and SecretAccessKey by following [AWS Credentials Guide](http://docs.aws.amazon.com/general/latest/gr/aws-security-credentials.html).
 
 ```sh
-mc config host add s3 https://s3.amazonaws.com BKIKJAA5BMMU2RHO6IBB V7f1CwQqAcwo80UEIJEjc5gVQUSSx5ohQ9GSrr12 S3v4
+mc config host add s3 https://s3.amazonaws.com BKIKJAA5BMMU2RHO6IBB V7f1CwQqAcwo80UEIJEjc5gVQUSSx5ohQ9GSrr12
 ```
 
 ### Example - Google Cloud Storage
 Get your AccessKeyID and SecretAccessKey by following [Google Credentials Guide](https://cloud.google.com/storage/docs/migrating?hl=en#keys)
 
 ```sh
-mc config host add gcs  https://storage.googleapis.com BKIKJAA5BMMU2RHO6IBB V8f1CwQqAcwo80UEIJEjc5gVQUSSx5ohQ9GSrr12 S3v2
+mc config host add gcs  https://storage.googleapis.com BKIKJAA5BMMU2RHO6IBB V8f1CwQqAcwo80UEIJEjc5gVQUSSx5ohQ9GSrr12
 ```
 
 NOTE: Google Cloud Storage only supports Legacy Signature Version 2, so you have to pick - S3v2
@@ -143,6 +138,27 @@ mc ls play
 [2016-01-28 17:23:11 PST]     0B newbucket/
 [2016-03-20 09:08:36 PDT]     0B s3git-test/
 ```
+
+Make a bucket
+`mb` command creates a new bucket.
+
+*Example:*
+```sh
+mc mb play/mybucket
+Bucket created successfully `play/mybucket`.
+```
+
+Copy Objects
+`cp` command copies data from one or more sources to a target.
+
+*Example:*
+```sh
+mc cp myobject.txt play/mybucket
+myobject.txt:    14 B / 14 B  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  100.00 % 41 B/s 0
+```
+
+
+
 <a name="everyday-use"></a>
 ## Everyday Use
 
@@ -179,3 +195,7 @@ cat      cp       events   mb       pipe     rm       share    version
 
 ## Contribute to Minio Project
 Please follow Minio [Contributor's Guide](https://github.com/minio/mc/blob/master/CONTRIBUTING.md)
+
+
+## License
+[![FOSSA Status](https://app.fossa.io/api/projects/git%2Bgithub.com%2Fminio%2Fmc.svg?type=large)](https://app.fossa.io/projects/git%2Bgithub.com%2Fminio%2Fmc?ref=badge_large)

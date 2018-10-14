@@ -1,5 +1,5 @@
 /*
- * Minio Client (C) 2015 Minio, Inc.
+ * Minio Client (C) 2015, 2016, 2017 Minio, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,13 +18,16 @@ package cmd
 
 import (
 	"crypto/tls"
-	"fmt"
+	"errors"
 	"io"
 	"math/rand"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/minio/minio-go"
 
 	"github.com/minio/mc/pkg/console"
 	"github.com/minio/mc/pkg/probe"
@@ -47,6 +50,13 @@ func isErrIgnored(err *probe.Error) (ignored bool) {
 	return ignored
 }
 
+const (
+	letterBytes   = "abcdefghijklmnopqrstuvwxyz01234569"
+	letterIdxBits = 6                    // 6 bits to represent a letter index
+	letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
+	letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
+)
+
 // UTCNow - returns current UTC time.
 func UTCNow() time.Time {
 	return time.Now().UTC()
@@ -62,6 +72,24 @@ func newRandomID(n int) string {
 		sid[i] = letters[rand.Intn(len(letters))]
 	}
 	return string(sid)
+}
+
+// randString generates random names and prepends them with a known prefix.
+func randString(n int, src rand.Source, prefix string) string {
+	b := make([]byte, n)
+	// A rand.Int63() generates 63 random bits, enough for letterIdxMax letters!
+	for i, cache, remain := n-1, src.Int63(), letterIdxMax; i >= 0; {
+		if remain == 0 {
+			cache, remain = src.Int63(), letterIdxMax
+		}
+		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
+			b[i] = letterBytes[idx]
+			i--
+		}
+		cache >>= letterIdxBits
+		remain--
+	}
+	return prefix + string(b[0:30-len(prefix)])
 }
 
 // dumpTlsCertificates prints some fields of the certificates received from the server.
@@ -95,43 +123,169 @@ func splitStr(path, sep string, n int) []string {
 	return splits
 }
 
-// buildS3Config fetches config related to the specified alias
-// to create a new config structure
-func buildS3Config(alias, urlStr string) (*Config, *probe.Error) {
-	hostCfg := mustGetHostConfig(alias)
-	if hostCfg == nil {
-		return nil, probe.NewError(fmt.Errorf("The specified alias: %s not found", urlStr))
-	}
-
+// newS3Config simply creates a new Config struct using the passed
+// parameters.
+func newS3Config(urlStr string, hostCfg *hostConfigV9) *Config {
 	// We have a valid alias and hostConfig. We populate the
 	// credentials from the match found in the config file.
 	s3Config := new(Config)
 
-	// Fetch keys from the environnement, otherwise, get them from the config file
-	keys := splitStr(os.Getenv("MC_SECRET_"+alias), ":", 2)
-	if isValidAccessKey(keys[0]) && isValidSecretKey(keys[1]) {
-		s3Config.AccessKey = keys[0]
-		s3Config.SecretKey = keys[1]
-	} else {
-		if keys[0] != "" {
-			console.Errorln("Access/Secret keys associated to `" + alias + "' " +
-				"are found in your environment but not suitable for use. " +
-				"Falling back to the standard config.")
-		}
-	}
-
-	if s3Config.AccessKey == "" {
-		s3Config.AccessKey = hostCfg.AccessKey
-		s3Config.SecretKey = hostCfg.SecretKey
-	}
-
-	s3Config.Signature = hostCfg.API
 	s3Config.AppName = "mc"
 	s3Config.AppVersion = Version
 	s3Config.AppComments = []string{os.Args[0], runtime.GOOS, runtime.GOARCH}
-	s3Config.HostURL = urlStr
 	s3Config.Debug = globalDebug
 	s3Config.Insecure = globalInsecure
 
-	return s3Config, nil
+	s3Config.HostURL = urlStr
+	if hostCfg != nil {
+		s3Config.AccessKey = hostCfg.AccessKey
+		s3Config.SecretKey = hostCfg.SecretKey
+		s3Config.Signature = hostCfg.API
+	}
+	s3Config.Lookup = getLookupType(hostCfg.Lookup)
+	return s3Config
+}
+
+// lineTrunc - truncates a string to the given maximum length by
+// adding ellipsis in the middle
+func lineTrunc(content string, maxLen int) string {
+	runes := []rune(content)
+	rlen := len(runes)
+	if rlen <= maxLen {
+		return content
+	}
+	halfLen := maxLen / 2
+	fstPart := string(runes[0:halfLen])
+	sndPart := string(runes[rlen-halfLen:])
+	return fstPart + "…" + sndPart
+}
+
+// isOlder returns true if the passed object is older than olderRef
+func isOlder(c *clientContent, olderRef int) bool {
+	objectAge := UTCNow().Sub(c.Time)
+	return objectAge < (time.Duration(olderRef) * Day)
+}
+
+// isNewer returns true if the passed object is newer than newerRef
+func isNewer(c *clientContent, newerRef int) bool {
+	objectAge := UTCNow().Sub(c.Time)
+	return objectAge > (time.Duration(newerRef) * Day)
+}
+
+// getLookupType returns the minio.BucketLookupType for lookup
+// option entered on the command line
+func getLookupType(l string) minio.BucketLookupType {
+	l = strings.ToLower(l)
+	switch l {
+	case "dns":
+		return minio.BucketLookupDNS
+	case "path":
+		return minio.BucketLookupPath
+	}
+	return minio.BucketLookupAuto
+}
+
+// struct representing object prefix and sse keys association.
+type prefixSSEPair struct {
+	prefix string
+	sseKey string
+}
+
+// parse and validate encryption keys entered on command line
+func parseAndValidateEncryptionKeys(sseKeys string) (encMap map[string][]prefixSSEPair, err *probe.Error) {
+	if sseKeys == "" {
+		return
+	}
+	encMap, err = parseEncryptionKeys(sseKeys)
+	if err != nil {
+		return nil, err
+	}
+	for alias, ps := range encMap {
+		if hostCfg := mustGetHostConfig(alias); hostCfg == nil {
+			for _, p := range ps {
+				return nil, probe.NewError(errors.New("sse-c prefix " + p.prefix + " has invalid alias"))
+			}
+		}
+	}
+	return encMap, nil
+}
+
+// parse list of comma separated alias/prefix=sse key values entered on command line and
+// construct a map of alias to prefix and sse pairs.
+func parseEncryptionKeys(sseKeys string) (encMap map[string][]prefixSSEPair, err *probe.Error) {
+	encMap = make(map[string][]prefixSSEPair)
+	if sseKeys == "" {
+		return
+	}
+	prefix := ""
+	ssekey := ""
+	index := 0 // start index of prefix
+	vs := 0    // start index of sse-c key
+	sseKeyLen := 32
+	delim := 1
+	k := len(sseKeys)
+	for index < k {
+		e := strings.Index(sseKeys[index:], "=")
+		if e == -1 {
+			return nil, probe.NewError(errors.New("sse-c prefix should be of the form prefix1=key1,... "))
+		}
+		prefix = sseKeys[index : index+e]
+		alias, _ := url2Alias(prefix)
+		vs = e + 1 + index
+		if vs+32 > k {
+			return nil, probe.NewError(errors.New("sse-c key should be 32 bytes long"))
+		}
+		ssekey = sseKeys[vs : vs+sseKeyLen]
+		if (vs+sseKeyLen < k) && sseKeys[vs+sseKeyLen] != ',' {
+			return nil, probe.NewError(errors.New("sse-c prefix=secret should be delimited by , and secret should be 32 bytes long"))
+		}
+		if _, ok := encMap[alias]; !ok {
+			encMap[alias] = make([]prefixSSEPair, 0)
+		}
+		ps := prefixSSEPair{prefix: prefix, sseKey: ssekey}
+		encMap[alias] = append(encMap[alias], ps)
+		// advance index sseKeyLen + delim bytes for the next key start
+		index = vs + sseKeyLen + delim
+	}
+	// sort encryption keys in descending order of prefix length
+	for _, encKeys := range encMap {
+		sort.Sort(byPrefixLength(encKeys))
+	}
+	return encMap, nil
+}
+
+// byPrefixLength implements sort.Interface.
+type byPrefixLength []prefixSSEPair
+
+func (p byPrefixLength) Len() int { return len(p) }
+func (p byPrefixLength) Less(i, j int) bool {
+	return len(p[i].prefix) > len(p[j].prefix)
+}
+func (p byPrefixLength) Swap(i, j int) { p[i], p[j] = p[j], p[i] }
+
+// get SSE Key if object prefix matches with given resource.
+func getSSEKey(resource string, encKeys []prefixSSEPair) string {
+	for _, k := range encKeys {
+		if strings.HasPrefix(resource, k.prefix) {
+			return k.sseKey
+		}
+	}
+	return ""
+}
+
+// Return true if target url is a part of a source url such as:
+// alias/bucket/ and alias/bucket/dir/, however
+func isURLContains(srcURL, tgtURL, sep string) bool {
+	// Add a separator to source url if not found
+	if !strings.HasSuffix(srcURL, sep) {
+		srcURL += sep
+	}
+	if !strings.HasSuffix(tgtURL, sep) {
+		tgtURL += sep
+	}
+	// Check if we are going to copy a directory into itself
+	if strings.HasPrefix(tgtURL, srcURL) {
+		return true
+	}
+	return false
 }

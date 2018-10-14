@@ -17,6 +17,8 @@
 package cmd
 
 import (
+	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -93,29 +95,29 @@ func mustGetMcConfigPath() string {
 	return path
 }
 
-// newMcConfig - initializes a new version '6' config.
-func newMcConfig() *configV8 {
-	cfg := newConfigV8()
+// newMcConfig - initializes a new version '9' config.
+func newMcConfig() *configV9 {
+	cfg := newConfigV9()
 	cfg.loadDefaults()
 	return cfg
 }
 
 // loadMcConfigCached - returns loadMcConfig with a closure for config cache.
-func loadMcConfigFactory() func() (*configV8, *probe.Error) {
+func loadMcConfigFactory() func() (*configV9, *probe.Error) {
 	// Load once and cache in a closure.
-	cfgCache, err := loadConfigV8()
+	cfgCache, err := loadConfigV9()
 
 	// loadMcConfig - reads configuration file and returns config.
-	return func() (*configV8, *probe.Error) {
+	return func() (*configV9, *probe.Error) {
 		return cfgCache, err
 	}
 }
 
 // loadMcConfig - returns configuration, initialized later.
-var loadMcConfig func() (*configV8, *probe.Error)
+var loadMcConfig func() (*configV9, *probe.Error)
 
 // saveMcConfig - saves configuration file and returns error if any.
-func saveMcConfig(config *configV8) *probe.Error {
+func saveMcConfig(config *configV9) *probe.Error {
 	if config == nil {
 		return errInvalidArgument().Trace()
 	}
@@ -126,7 +128,7 @@ func saveMcConfig(config *configV8) *probe.Error {
 	}
 
 	// Save the config.
-	if err := saveConfigV8(config); err != nil {
+	if err := saveConfigV9(config); err != nil {
 		return err.Trace(mustGetMcConfigPath())
 	}
 
@@ -153,7 +155,7 @@ func isValidAlias(alias string) bool {
 }
 
 // getHostConfig retrieves host specific configuration such as access keys, signature type.
-func getHostConfig(alias string) (*hostConfigV8, *probe.Error) {
+func getHostConfig(alias string) (*hostConfigV9, *probe.Error) {
 	mcCfg, err := loadMcConfig()
 	if err != nil {
 		return nil, err.Trace(alias)
@@ -170,15 +172,108 @@ func getHostConfig(alias string) (*hostConfigV8, *probe.Error) {
 }
 
 // mustGetHostConfig retrieves host specific configuration such as access keys, signature type.
-func mustGetHostConfig(alias string) *hostConfigV8 {
+func mustGetHostConfig(alias string) *hostConfigV9 {
 	hostCfg, _ := getHostConfig(alias)
 	return hostCfg
 }
 
+// parse url usually obtained from env.
+func parseEnvURL(envURL string) (*url.URL, string, string, *probe.Error) {
+	u, e := url.Parse(envURL)
+	if e != nil {
+		return nil, "", "", probe.NewError(e).Trace(envURL)
+	}
+
+	var accessKey, secretKey string
+	// Check if username:password is provided in URL, with no
+	// access keys or secret we proceed and perform anonymous
+	// requests.
+	if u.User != nil {
+		accessKey = u.User.Username()
+		secretKey, _ = u.User.Password()
+	}
+
+	// Look for if URL has invalid values and return error.
+	if !((u.Scheme == "http" || u.Scheme == "https") &&
+		(u.Path == "/" || u.Path == "") && u.Opaque == "" &&
+		u.ForceQuery == false && u.RawQuery == "" && u.Fragment == "") {
+		return nil, "", "", errInvalidArgument().Trace(u.String())
+	}
+
+	// Now that we have validated the URL to be in expected style.
+	u.User = nil
+
+	return u, accessKey, secretKey, nil
+}
+
+// parse url usually obtained from env.
+func parseEnvURLStr(envURL string) (*url.URL, string, string, *probe.Error) {
+	var envURLStr string
+	u, accessKey, secretKey, err := parseEnvURL(envURL)
+	if err != nil {
+		// url parsing can fail when accessKey/secretKey contains non url encoded values
+		// such as #. Strip accessKey/secretKey from envURL and parse again.
+		re := regexp.MustCompile("^(https?://)(.*?):(.*?)@(.*?)$")
+		res := re.FindAllStringSubmatch(envURL, -1)
+		// regex will return full match, scheme, accessKey, secretKey and endpoint:port as
+		// captured groups.
+		if len(res[0]) != 5 {
+			return nil, "", "", err
+		}
+		for k, v := range res[0] {
+			if k == 2 {
+				accessKey = fmt.Sprintf("%s", v)
+			}
+			if k == 3 {
+				secretKey = fmt.Sprintf("%s", v)
+			}
+			if k == 1 || k == 4 {
+				envURLStr = fmt.Sprintf("%s%s", envURLStr, v)
+			}
+		}
+		u, _, _, err = parseEnvURL(envURLStr)
+		if err != nil {
+			return nil, "", "", err
+		}
+	}
+	// Check if username:password is provided in URL, with no
+	// access keys or secret we proceed and perform anonymous
+	// requests.
+	if u.User != nil {
+		accessKey = u.User.Username()
+		secretKey, _ = u.User.Password()
+	}
+	return u, accessKey, secretKey, nil
+}
+
+const mcEnvHostsPrefix = "MC_HOSTS_"
+
+func expandAliasFromEnv(envURL string) (*hostConfigV9, *probe.Error) {
+	u, accessKey, secretKey, err := parseEnvURLStr(envURL)
+	if err != nil {
+		return nil, err.Trace(envURL)
+	}
+
+	return &hostConfigV9{
+		URL:       u.String(),
+		API:       "S3v4",
+		AccessKey: accessKey,
+		SecretKey: secretKey,
+	}, nil
+}
+
 // expandAlias expands aliased URL if any match is found, returns as is otherwise.
-func expandAlias(aliasedURL string) (alias string, urlStr string, hostCfg *hostConfigV8, err *probe.Error) {
+func expandAlias(aliasedURL string) (alias string, urlStr string, hostCfg *hostConfigV9, err *probe.Error) {
 	// Extract alias from the URL.
 	alias, path := url2Alias(aliasedURL)
+
+	if envConfig, ok := os.LookupEnv(mcEnvHostsPrefix + alias); ok {
+		hostCfg, err = expandAliasFromEnv(envConfig)
+		if err != nil {
+			return "", "", nil, err.Trace(aliasedURL)
+		}
+		return alias, urlJoinPath(hostCfg.URL, path), hostCfg, nil
+	}
 
 	// Find the matching alias entry and expand the URL.
 	if hostCfg = mustGetHostConfig(alias); hostCfg != nil {
@@ -188,7 +283,7 @@ func expandAlias(aliasedURL string) (alias string, urlStr string, hostCfg *hostC
 }
 
 // mustExpandAlias expands aliased URL if any match is found, returns as is otherwise.
-func mustExpandAlias(aliasedURL string) (alias string, urlStr string, hostCfg *hostConfigV8) {
+func mustExpandAlias(aliasedURL string) (alias string, urlStr string, hostCfg *hostConfigV9) {
 	alias, urlStr, hostCfg, _ = expandAlias(aliasedURL)
 	return alias, urlStr, hostCfg
 }

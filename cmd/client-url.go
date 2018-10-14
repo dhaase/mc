@@ -18,13 +18,13 @@ package cmd
 
 import (
 	"bytes"
-	"mime"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
 
 	"github.com/minio/mc/pkg/probe"
+	"github.com/minio/minio/pkg/mimedb"
 )
 
 // url client url structure
@@ -171,17 +171,15 @@ func urlJoinPath(url1, url2 string) string {
 }
 
 // url2Stat returns stat info for URL.
-func url2Stat(urlStr string) (client Client, content *clientContent, err *probe.Error) {
-	return url2StatWithMetadata(urlStr, false)
-}
-
-// url2Stat returns stat info for URL.
-func url2StatWithMetadata(urlStr string, isFetchMeta bool) (client Client, content *clientContent, err *probe.Error) {
+func url2Stat(urlStr string, isFetchMeta bool, encKeyDB map[string][]prefixSSEPair) (client Client, content *clientContent, err *probe.Error) {
 	client, err = newClient(urlStr)
 	if err != nil {
 		return nil, nil, err.Trace(urlStr)
 	}
-	content, err = client.Stat(false, isFetchMeta)
+	alias, _ := url2Alias(urlStr)
+	sseKey := getSSEKey(urlStr, encKeyDB[alias])
+
+	content, err = client.Stat(false, isFetchMeta, sseKey)
 	if err != nil {
 		return nil, nil, err.Trace(urlStr)
 	}
@@ -230,9 +228,6 @@ func isURLPrefixExists(urlPrefix string, incomplete bool) bool {
 // on failure just return 'application/octet-stream'.
 func guessURLContentType(urlStr string) string {
 	url := newClientURL(urlStr)
-	contentType := mime.TypeByExtension(filepath.Ext(url.Path))
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
+	contentType := mimedb.TypeByExtension(filepath.Ext(url.Path))
 	return contentType
 }

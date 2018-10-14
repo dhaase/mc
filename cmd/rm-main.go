@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/fatih/color"
@@ -41,7 +43,11 @@ var (
 		},
 		cli.BoolFlag{
 			Name:  "force",
-			Usage: "Force a dangerous remove operation.",
+			Usage: "Allow a recursive remove operation.",
+		},
+		cli.BoolFlag{
+			Name:  "dangerous",
+			Usage: "Allow site-wide removal of buckets and objects.",
 		},
 		cli.BoolFlag{
 			Name:  "incomplete, I",
@@ -57,7 +63,15 @@ var (
 		},
 		cli.IntFlag{
 			Name:  "older-than",
-			Usage: "Remove objects older than N days.",
+			Usage: "Remove objects older than N days",
+		},
+		cli.IntFlag{
+			Name:  "newer-than",
+			Usage: "Remove objects newer than N days",
+		},
+		cli.StringFlag{
+			Name:  "encrypt-key",
+			Usage: "Encrypt object (using server-side encryption)",
 		},
 	}
 )
@@ -78,21 +92,37 @@ USAGE:
 FLAGS:
   {{range .VisibleFlags}}{{.}}
   {{end}}
+
+ENVIRONMENT VARIABLES:
+   MC_ENCRYPT_KEY: List of comma delimited prefix=secret values
+
 EXAMPLES:
    1. Remove a file.
       $ {{.HelpName}} 1999/old-backup.tgz
 
-   2. Remove all objects recursively.
+   2. Remove all objects recursively from bucket 'jazz-songs' matching 'louis' prefix.
       $ {{.HelpName}} --recursive s3/jazz-songs/louis/
 
-   3. Remove all objects older than '90' days.
+   3. Remove all objects older than '90' days recursively from bucket 'jazz-songs' that match 'louis' prefix.
       $ {{.HelpName}} --recursive --older-than=90 s3/jazz-songs/louis/
 
-   4. Remove all objects read from STDIN.
+   4. Remove all objects newer than 7 days recursively from bucket 'pop-songs'
+      $ {{.HelpName}} --recursive --newer-than=7 s3/pop-songs/
+
+   5. Remove all objects read from STDIN.
       $ {{.HelpName}} --force --stdin
 
-   5. Drop all incomplete uploads on 'jazz-songs' bucket.
+   6. Remove all buckets and objects recursively from S3 host
+      $ {{.HelpName}} --recursive --dangerous s3
+
+   7. Remove all buckets and objects older than '90' days recursively from host
+      $ {{.HelpName}} --recursive --dangerous --older-than=90 s3
+
+   8. Drop all incomplete uploads on 'jazz-songs' bucket.
       $ {{.HelpName}} --incomplete --recursive s3/jazz-songs/
+
+   9. Remove an encrypted object from s3.
+      $ {{.HelpName}} --encrypt-key "s3/ferenginar/=32byteslongsecretkeymustbegiven1" s3/ferenginar/1999/old-backup.tgz
 
 `,
 }
@@ -116,12 +146,25 @@ func (r rmMessage) JSON() string {
 }
 
 // Validate command line arguments.
-func checkRmSyntax(ctx *cli.Context) {
+func checkRmSyntax(ctx *cli.Context, encKeyDB map[string][]prefixSSEPair) {
 	// Set command flags from context.
 	isForce := ctx.Bool("force")
 	isRecursive := ctx.Bool("recursive")
 	isStdin := ctx.Bool("stdin")
+	isDangerous := ctx.Bool("dangerous")
+	isNamespaceRemoval := false
 
+	for _, url := range ctx.Args() {
+		// clean path for aliases like s3/.
+		//Note: UNC path using / works properly in go 1.9.2 even though it breaks the UNC specification.
+		url = filepath.ToSlash(filepath.Clean(url))
+		// namespace removal applies only for non FS. So filter out if passed url represents a directory
+		if !isAliasURLDir(url, encKeyDB) {
+			_, path := url2Alias(url)
+			isNamespaceRemoval = (path == "")
+			break
+		}
+	}
 	if !ctx.Args().Present() && !isStdin {
 		exitCode := 1
 		cli.ShowCommandHelpAndExit(ctx, "rm", exitCode)
@@ -129,32 +172,43 @@ func checkRmSyntax(ctx *cli.Context) {
 
 	// For all recursive operations make sure to check for 'force' flag.
 	if (isRecursive || isStdin) && !isForce {
+		if isNamespaceRemoval {
+			fatalIf(errDummy().Trace(),
+				"This operation results in site-wide removal of buckets and objects. If you are really sure, retry this command with ‘--dangerous’ and ‘--force’ flags.")
+		}
 		fatalIf(errDummy().Trace(),
-			"Removal requires --force option. This operation is *IRREVERSIBLE*. Please review carefully before performing this *DANGEROUS* operation.")
+			"Removal requires --force flag. This operation is *IRREVERSIBLE*. Please review carefully before performing this *DANGEROUS* operation.")
+	}
+	if (isRecursive || isStdin) && isNamespaceRemoval && !isDangerous {
+		fatalIf(errDummy().Trace(),
+			"This operation results in site-wide removal of buckets and objects. If you are really sure, retry this command with ‘--dangerous’ and ‘--force’ flags.")
 	}
 }
 
-func removeSingle(url string, isIncomplete bool, isFake bool, older int) error {
+func removeSingle(url string, isIncomplete bool, isFake bool, olderThan int, newerThan int, encKeyDB map[string][]prefixSSEPair) error {
 	targetAlias, targetURL, _ := mustExpandAlias(url)
 	clnt, pErr := newClientFromAlias(targetAlias, targetURL)
 	if pErr != nil {
 		errorIf(pErr.Trace(url), "Invalid argument `"+url+"`.")
 		return exitStatus(globalErrorExitStatus) // End of journey.
 	}
-	isFetchMeta := false
-	content, pErr := clnt.Stat(isIncomplete, isFetchMeta)
+	isFetchMeta := true
+	alias, _ := url2Alias(url)
+	sseKey := getSSEKey(url, encKeyDB[alias])
+	content, pErr := clnt.Stat(isIncomplete, isFetchMeta, sseKey)
 	if pErr != nil {
 		errorIf(pErr.Trace(url), "Failed to remove `"+url+"`.")
 		return exitStatus(globalErrorExitStatus)
 	}
-	if older > 0 {
-		// Check whether object is created older than given time.
-		now := UTCNow()
-		timeDiff := now.Sub(content.Time)
-		if timeDiff < (time.Duration(older) * Day) {
-			// time difference of info.Time with current time is less than older time.
-			return nil
-		}
+
+	// Skip objects older than older--than parameter if specified
+	if olderThan > 0 && isOlder(content, olderThan) {
+		return nil
+	}
+
+	// Skip objects older than older--than parameter if specified
+	if newerThan > 0 && isNewer(content, newerThan) {
+		return nil
 	}
 
 	printMsg(rmMessage{
@@ -183,14 +237,13 @@ func removeSingle(url string, isIncomplete bool, isFake bool, older int) error {
 	return nil
 }
 
-func removeRecursive(url string, isIncomplete bool, isFake bool, older int) error {
+func removeRecursive(url string, isIncomplete bool, isFake bool, olderThan int, newerThan int, encKeyDB map[string][]prefixSSEPair) error {
 	targetAlias, targetURL, _ := mustExpandAlias(url)
 	clnt, pErr := newClientFromAlias(targetAlias, targetURL)
 	if pErr != nil {
 		errorIf(pErr.Trace(url), "Failed to remove `"+url+"` recursively.")
 		return exitStatus(globalErrorExitStatus) // End of journey.
 	}
-
 	contentCh := make(chan *clientContent)
 	errorCh := clnt.Remove(isIncomplete, contentCh)
 
@@ -208,23 +261,26 @@ func removeRecursive(url string, isIncomplete bool, isFake bool, older int) erro
 			close(contentCh)
 			return exitStatus(globalErrorExitStatus)
 		}
+		urlString := content.URL.Path
 
-		if older > 0 {
-			// Check whether object is created older than given time.
-			now := UTCNow()
-			timeDiff := now.Sub(content.Time)
-			if timeDiff < (time.Duration(older) * Day) {
-				// time difference of info.Time with current time is less than older time.
-				continue
-			}
+		// Skip objects older than --older-than parameter if specified
+		if olderThan > 0 && isOlder(content, olderThan) {
+			continue
 		}
 
-		urlString := content.URL.Path
-		printMsg(rmMessage{
-			Key:  targetAlias + urlString,
-			Size: content.Size,
-		})
+		// Skip objects newer than --newer-than parameter if specified
+		if newerThan > 0 && isNewer(content, newerThan) {
+			continue
+		}
 
+		// list internally mimics recursive directory listing of object prefixes for s3 similar to FS.
+		// The rmMessage needs to be printed only for actual objects being deleted and not prefixes.
+		if !(content.Time.IsZero() && strings.HasSuffix(urlString, string(filepath.Separator))) {
+			printMsg(rmMessage{
+				Key:  targetAlias + urlString,
+				Size: content.Size,
+			})
+		}
 		if !isFake {
 			sent := false
 			for !sent {
@@ -238,7 +294,6 @@ func removeRecursive(url string, isIncomplete bool, isFake bool, older int) erro
 						// Ignore Permission error.
 						continue
 					}
-
 					close(contentCh)
 					return exitStatus(globalErrorExitStatus)
 				}
@@ -266,32 +321,36 @@ func removeRecursive(url string, isIncomplete bool, isFake bool, older int) erro
 
 // main for rm command.
 func mainRm(ctx *cli.Context) error {
+	// Parse encryption keys per command.
+	encKeyDB, err := getEncKeys(ctx)
+	fatalIf(err, "Unable to parse encryption keys.")
 
 	// check 'rm' cli arguments.
-	checkRmSyntax(ctx)
+	checkRmSyntax(ctx, encKeyDB)
 
 	// rm specific flags.
 	isIncomplete := ctx.Bool("incomplete")
 	isRecursive := ctx.Bool("recursive")
 	isFake := ctx.Bool("fake")
 	isStdin := ctx.Bool("stdin")
-	older := ctx.Int("older-than")
+	olderThan := ctx.Int("older-than")
+	newerThan := ctx.Int("newer-than")
 
 	// Set color.
 	console.SetColor("Remove", color.New(color.FgGreen, color.Bold))
 
 	var rerr error
-	var err error
+	var e error
 	// Support multiple targets.
 	for _, url := range ctx.Args() {
 		if isRecursive {
-			err = removeRecursive(url, isIncomplete, isFake, older)
+			e = removeRecursive(url, isIncomplete, isFake, olderThan, newerThan, encKeyDB)
 		} else {
-			err = removeSingle(url, isIncomplete, isFake, older)
+			e = removeSingle(url, isIncomplete, isFake, olderThan, newerThan, encKeyDB)
 		}
 
 		if rerr == nil {
-			rerr = err
+			rerr = e
 		}
 	}
 
@@ -303,13 +362,13 @@ func mainRm(ctx *cli.Context) error {
 	for scanner.Scan() {
 		url := scanner.Text()
 		if isRecursive {
-			err = removeRecursive(url, isIncomplete, isFake, older)
+			e = removeRecursive(url, isIncomplete, isFake, olderThan, newerThan, encKeyDB)
 		} else {
-			err = removeSingle(url, isIncomplete, isFake, older)
+			e = removeSingle(url, isIncomplete, isFake, olderThan, newerThan, encKeyDB)
 		}
 
 		if rerr == nil {
-			rerr = err
+			rerr = e
 		}
 	}
 

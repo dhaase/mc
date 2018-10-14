@@ -1,5 +1,5 @@
 /*
- * Minio Client (C) 2016 Minio, Inc.
+ * Minio Client (C) 2016, 2017, 2018 Minio, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,7 +36,7 @@ var (
 
 var adminInfoCmd = cli.Command{
 	Name:   "info",
-	Usage:  "Get Minio server information",
+	Usage:  "Display Minio server information",
 	Action: mainAdminInfo,
 	Before: setGlobalsFromContext,
 	Flags:  append(adminInfoFlags, globalFlags...),
@@ -74,12 +74,22 @@ type xlBackend struct {
 	Type         backendType `json:"backendType"`
 	OnlineDisks  int         `json:"onlineDisks"`
 	OfflineDisks int         `json:"offlineDisks"`
+	// Data disks for currently configured Standard storage class.
+	StandardSCData int `json:"standardSCData"`
+	// Parity disks for currently configured Standard storage class.
+	StandardSCParity int `json:"standardSCParity"`
+	// Data disks for currently configured Reduced Redundancy storage class.
+	RRSCData int `json:"rrSCData"`
+	// Parity disks for currently configured Reduced Redundancy storage class.
+	RRSCParity int `json:"rrSCParity"`
+
+	// List of all disk status.
+	Sets [][]madmin.DriveInfo `json:"sets"`
 }
 
 // backendStatus represents the overall information of all backend storage types
 type backendStatus struct {
-	Total   int64       `json:"total"`
-	Free    int64       `json:"free"`
+	Used    uint64      `json:"used"`
 	Backend interface{} `json:"backend"`
 }
 
@@ -94,7 +104,7 @@ type ServerInfo struct {
 // infoMessage container to hold service status information.
 type infoMessage struct {
 	Status  string `json:"status"`
-	Service bool   `json:"service"`
+	Service string `json:"service"`
 	Addr    string `json:"address"`
 	Err     string `json:"error"`
 	*ServerInfo
@@ -109,7 +119,7 @@ func (u infoMessage) String() (msg string) {
 	dot := "●"
 
 	// When service is offline
-	if !u.Service {
+	if u.Service == "off" {
 		msg += fmt.Sprintf("%s  %s\n", console.Colorize("InfoFail", dot), u.Addr)
 		msg += fmt.Sprintf("   Uptime : Server is %s", console.Colorize("InfoFail", "offline"))
 		return
@@ -129,7 +139,8 @@ func (u infoMessage) String() (msg string) {
 	// Print server information
 
 	// Uptime
-	msg += fmt.Sprintf("   Uptime : %s since %s\n", console.Colorize("Info", "online"), humanize.Time(time.Now().UTC().Add(-u.ServerInfo.Properties.Uptime)))
+	msg += fmt.Sprintf("   Uptime : %s since %s\n", console.Colorize("Info", "online"),
+		humanize.Time(time.Now().UTC().Add(-u.ServerInfo.Properties.Uptime)))
 	// Version
 	msg += fmt.Sprintf("  Version : %s\n", u.ServerInfo.Properties.Version)
 	// Region
@@ -144,18 +155,15 @@ func (u infoMessage) String() (msg string) {
 	}
 	msg += fmt.Sprintf(" SQS ARNs : %s\n", sqsARNs)
 	// Incoming/outgoing
-	msg += fmt.Sprintf("  Network : Incoming %s, Outgoing %s\n",
+	msg += fmt.Sprintf("    Stats : Incoming %s, Outgoing %s\n",
 		humanize.IBytes(u.ServerInfo.ConnStats.TotalInputBytes),
 		humanize.IBytes(u.ServerInfo.ConnStats.TotalOutputBytes))
 	// Get storage information
-	msg += fmt.Sprintf("  Storage : Total %s, Free %s",
-		humanize.IBytes(uint64(u.StorageInfo.Total)),
-		humanize.IBytes(uint64(u.StorageInfo.Free)),
-	)
+	msg += fmt.Sprintf("  Storage : Used %s", humanize.IBytes(u.StorageInfo.Used))
 	if v, ok := u.ServerInfo.StorageInfo.Backend.(xlBackend); ok {
-		msg += fmt.Sprintf(", Online Disks: %d, Offline Disks: %d", v.OnlineDisks, v.OfflineDisks)
+		msg += fmt.Sprintf("\n    Disks : %s, %s\n", console.Colorize("Info", v.OnlineDisks),
+			console.Colorize("InfoFail", v.OfflineDisks))
 	}
-
 	return
 }
 
@@ -180,6 +188,7 @@ func mainAdminInfo(ctx *cli.Context) error {
 	checkAdminInfoSyntax(ctx)
 
 	console.SetColor("Info", color.New(color.FgGreen, color.Bold))
+	console.SetColor("InfoDegraded", color.New(color.FgYellow, color.Bold))
 	console.SetColor("InfoFail", color.New(color.FgRed, color.Bold))
 
 	// Get the alias parameter from cli
@@ -204,7 +213,7 @@ func mainAdminInfo(ctx *cli.Context) error {
 	}
 
 	if serviceOffline {
-		printMsg(infoMessage{Addr: aliasedURL, Service: false})
+		printMsg(infoMessage{Addr: aliasedURL, Service: "off"})
 		return nil
 	}
 
@@ -215,7 +224,7 @@ func mainAdminInfo(ctx *cli.Context) error {
 		// Print the error if exists and jump to the next server
 		if serverInfo.Error != "" {
 			printMsg(infoMessage{
-				Service: true,
+				Service: "on",
 				Addr:    serverInfo.Addr,
 				Err:     serverInfo.Error,
 			})
@@ -224,15 +233,19 @@ func mainAdminInfo(ctx *cli.Context) error {
 
 		// Construct the backend status
 		storageInfo := backendStatus{
-			Total: serverInfo.Data.StorageInfo.Total,
-			Free:  serverInfo.Data.StorageInfo.Free,
+			Used: serverInfo.Data.StorageInfo.Used,
 		}
 
 		if serverInfo.Data.StorageInfo.Backend.Type == madmin.Erasure {
 			storageInfo.Backend = xlBackend{
-				Type:         erasureType,
-				OnlineDisks:  serverInfo.Data.StorageInfo.Backend.OnlineDisks,
-				OfflineDisks: serverInfo.Data.StorageInfo.Backend.OfflineDisks,
+				Type:             erasureType,
+				OnlineDisks:      serverInfo.Data.StorageInfo.Backend.OnlineDisks,
+				OfflineDisks:     serverInfo.Data.StorageInfo.Backend.OfflineDisks,
+				StandardSCData:   serverInfo.Data.StorageInfo.Backend.StandardSCData,
+				StandardSCParity: serverInfo.Data.StorageInfo.Backend.StandardSCParity,
+				RRSCData:         serverInfo.Data.StorageInfo.Backend.RRSCData,
+				RRSCParity:       serverInfo.Data.StorageInfo.Backend.RRSCParity,
+				Sets:             serverInfo.Data.StorageInfo.Backend.Sets,
 			}
 		} else {
 			storageInfo.Backend = fsBackend{
@@ -241,7 +254,7 @@ func mainAdminInfo(ctx *cli.Context) error {
 		}
 
 		printMsg(infoMessage{
-			Service: true,
+			Service: "on",
 			Addr:    serverInfo.Addr,
 			Err:     serverInfo.Error,
 			ServerInfo: &ServerInfo{

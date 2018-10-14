@@ -95,6 +95,11 @@ func (f *fsClient) GetURL() clientURL {
 	return *f.PathURL
 }
 
+// Select replies a stream of query results.
+func (f *fsClient) Select(expression, sseKey string) (io.ReadCloser, *probe.Error) {
+	return nil, probe.NewError(APINotImplemented{})
+}
+
 // Watches for all fs events on an input path.
 func (f *fsClient) Watch(params watchParams) (*watchObject, *probe.Error) {
 	eventChan := make(chan EventInfo)
@@ -212,21 +217,27 @@ func (f *fsClient) put(reader io.Reader, size int64, metadata map[string][]strin
 	// For filesystem this is a redundant information.
 
 	// Extract dir name.
-	objectDir, _ := filepath.Split(f.PathURL.Path)
-	objectPath := f.PathURL.Path
+	objectDir, objectName := filepath.Split(f.PathURL.Path)
 
-	avoidResumeUpload := isStreamFile(objectPath)
-	// Write to a temporary file "object.part.minio" before commit.
-	objectPartPath := objectPath + partSuffix
-	if avoidResumeUpload {
-		objectPartPath = objectPath
-	}
 	if objectDir != "" {
 		// Create any missing top level directories.
 		if e := os.MkdirAll(objectDir, 0777); e != nil {
 			err := f.toClientError(e, f.PathURL.Path)
 			return 0, err.Trace(f.PathURL.Path)
 		}
+
+		// Check if object name is empty, it must be an empty directory
+		if objectName == "" {
+			return 0, nil
+		}
+	}
+
+	objectPath := f.PathURL.Path
+	avoidResumeUpload := isStreamFile(objectPath)
+	// Write to a temporary file "object.part.minio" before commit.
+	objectPartPath := objectPath + partSuffix
+	if avoidResumeUpload {
+		objectPartPath = objectPath
 	}
 
 	// If exists, open in append mode. If not create it the part file.
@@ -315,7 +326,7 @@ func (f *fsClient) put(reader io.Reader, size int64, metadata map[string][]strin
 }
 
 // Put - create a new file with metadata.
-func (f *fsClient) Put(ctx context.Context, reader io.Reader, size int64, metadata map[string]string, progress io.Reader) (int64, *probe.Error) {
+func (f *fsClient) Put(ctx context.Context, reader io.Reader, size int64, metadata map[string]string, progress io.Reader, sseKey string) (int64, *probe.Error) {
 	return f.put(reader, size, nil, progress)
 }
 
@@ -368,11 +379,14 @@ func createFile(fpath string) (io.WriteCloser, error) {
 }
 
 // Copy - copy data from source to destination
-func (f *fsClient) Copy(source string, size int64, progress io.Reader) *probe.Error {
+func (f *fsClient) Copy(source string, size int64, progress io.Reader, srcSSEKey, tgtSSEKey string) *probe.Error {
 	// Don't use f.Get() f.Put() directly. Instead use readFile and createFile
 	destination := f.PathURL.Path
 	if destination == source { // Cannot copy file into itself
-		return errOverWriteNotAllowed(destination).Trace(destination)
+		return probe.NewError(SameFile{
+			Source:      source,
+			Destination: destination,
+		})
 	}
 	rc, e := readFile(source)
 	if e != nil {
@@ -431,7 +445,7 @@ func (f *fsClient) get() (io.Reader, *probe.Error) {
 }
 
 // Get returns reader and any additional metadata.
-func (f *fsClient) Get() (io.Reader, *probe.Error) {
+func (f *fsClient) Get(sseKey string) (io.Reader, *probe.Error) {
 	return f.get()
 }
 
@@ -965,7 +979,7 @@ func (f *fsClient) SetAccess(access string) *probe.Error {
 }
 
 // Stat - get metadata from path.
-func (f *fsClient) Stat(isIncomplete, isFetchMeta bool) (content *clientContent, err *probe.Error) {
+func (f *fsClient) Stat(isIncomplete, isFetchMeta bool, sseKey string) (content *clientContent, err *probe.Error) {
 	st, err := f.fsStat(isIncomplete)
 	if err != nil {
 		return nil, err.Trace(f.PathURL.String())
@@ -978,12 +992,19 @@ func (f *fsClient) Stat(isIncomplete, isFetchMeta bool) (content *clientContent,
 	content.Metadata = map[string]string{
 		"Content-Type": guessURLContentType(f.PathURL.Path),
 	}
-	path := f.PathURL.String()
-	metaData, pErr := getAllXattrs(path)
-	if pErr != nil {
-		return content, nil
+	// isFetchMeta is true only in the case of mc stat command which lists any extended attributes
+	// present for this object.
+	if isFetchMeta {
+		path := f.PathURL.String()
+		metaData, pErr := getAllXattrs(path)
+		if pErr != nil {
+			return content, nil
+		}
+		for k, v := range metaData {
+			content.Metadata[k] = v
+		}
 	}
-	content.Metadata = metaData
+
 	return content, nil
 }
 

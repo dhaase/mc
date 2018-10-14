@@ -96,7 +96,7 @@ func (e ObjectOnGlacier) Error() string {
 type BucketNameTopLevel struct{}
 
 func (e BucketNameTopLevel) Error() string {
-	return "Buckets can only be created at the top level."
+	return "Buckets or prefixes can only be created with `/` suffix."
 }
 
 // GenericFileError - generic file error.
@@ -181,4 +181,13 @@ type UnexpectedExcessRead UnexpectedEOF
 func (e UnexpectedExcessRead) Error() string {
 	msg := fmt.Sprintf("Received excess data on input reader. Expected only `%d` bytes, but received `%d` bytes.", e.TotalSize, e.TotalWritten)
 	return msg
+}
+
+// SameFile - source and destination are same files.
+type SameFile struct {
+	Source, Destination string
+}
+
+func (e SameFile) Error() string {
+	return fmt.Sprintf("'%s' and '%s' are the same file", e.Source, e.Destination)
 }

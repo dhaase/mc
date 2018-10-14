@@ -8,14 +8,19 @@ env:
 - ARCH=x86_64
 
 go:
-- 1.9.1
+- 1.10.4
+
+addons:
+  apt:
+    packages:
+      - devscripts
 
 script:
-- make test GOFLAGS="-race"
-- make coverage
-- diff -au <(gofmt -d *.go) <(printf "")
-- diff -au <(gofmt -d cmd) <(printf "")
-- diff -au <(gofmt -d pkg) <(printf "")
+  - make test GOFLAGS="-race"
+  - make coverage
+  - diff -au <(gofmt -d *.go) <(printf "")
+  - diff -au <(gofmt -d cmd) <(printf "")
+  - diff -au <(gofmt -d pkg) <(printf "")
 
 after_success:
 - bash <(curl -s https://codecov.io/bash)

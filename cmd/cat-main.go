@@ -34,7 +34,12 @@ import (
 )
 
 var (
-	catFlags = []cli.Flag{}
+	catFlags = []cli.Flag{
+		cli.StringFlag{
+			Name:  "encrypt-key",
+			Usage: "Decrypt object (using server-side encryption)",
+		},
+	}
 )
 
 // Display contents of a file.
@@ -53,16 +58,21 @@ USAGE:
 FLAGS:
   {{range .VisibleFlags}}{{.}}
   {{end}}
+
+ENVIRONMENT VARIABLES:
+   MC_ENCRYPT_KEY:  List of comma delimited prefix=secret values
 EXAMPLES:
    1. Stream an object from Amazon S3 cloud storage to mplayer standard input.
       $ {{.HelpName}} s3/ferenginar/klingon_opera_aktuh_maylotah.ogg | mplayer -
 
-   2. Concantenate contents of file1.txt and stdin to standard output.
+   2. Concatenate contents of file1.txt and stdin to standard output.
       $ {{.HelpName}} file1.txt - > file.txt
 
-   3. Concantenate multiple files to one.
+   3. Concatenate multiple files to one.
       $ {{.HelpName}} part.* > complete.img
-
+   
+   4. Stream a server encrypted object from Amazon S3 cloud storage to standard output.
+      $ {{.HelpName}} --encrypt-key 's3/ferenginar=32byteslongsecretkeymustbegiven1' s3/ferenginar/klingon_opera_aktuh_maylotah.ogg
 `,
 }
 
@@ -129,7 +139,7 @@ func checkCatSyntax(ctx *cli.Context) {
 }
 
 // catURL displays contents of a URL to stdout.
-func catURL(sourceURL string) *probe.Error {
+func catURL(sourceURL string, encKeyDB map[string][]prefixSSEPair) *probe.Error {
 	var reader io.Reader
 	size := int64(-1)
 	switch sourceURL {
@@ -142,11 +152,11 @@ func catURL(sourceURL string) *probe.Error {
 		// downloaded object is equal to the original one. FS files
 		// are ignored since some of them have zero size though they
 		// have contents like files under /proc.
-		client, content, err := url2Stat(sourceURL)
+		client, content, err := url2Stat(sourceURL, false, encKeyDB)
 		if err == nil && client.GetURL().Type == objectStorage {
 			size = content.Size
 		}
-		if reader, err = getSourceStreamFromURL(sourceURL); err != nil {
+		if reader, err = getSourceStreamFromURL(sourceURL, encKeyDB); err != nil {
 			return err.Trace(sourceURL)
 		}
 	}
@@ -200,6 +210,9 @@ func catOut(r io.Reader, size int64) *probe.Error {
 
 // mainCat is the main entry point for cat command.
 func mainCat(ctx *cli.Context) error {
+	// Parse encryption keys per command.
+	encKeyDB, err := getEncKeys(ctx)
+	fatalIf(err, "Unable to parse encryption keys.")
 
 	// check 'cat' cli arguments.
 	checkCatSyntax(ctx)
@@ -230,7 +243,8 @@ func mainCat(ctx *cli.Context) error {
 
 	// Convert arguments to URLs: expand alias, fix format.
 	for _, url := range args {
-		fatalIf(catURL(url).Trace(url), "Unable to read from `"+url+"`.")
+		fatalIf(catURL(url, encKeyDB).Trace(url), "Unable to read from `"+url+"`.")
 	}
+
 	return nil
 }
